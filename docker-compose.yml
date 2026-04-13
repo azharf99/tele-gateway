@@ -1,0 +1,34 @@
+services:
+  tele-gateway:
+    build: .
+    container_name: tele-gateway
+    restart: always
+    ports:
+      - "8085:8080"
+    environment:
+      # Telegram API Credentials (will be overridden by .env file)
+      - TELEGRAM_APP_ID=${TELEGRAM_APP_ID}
+      - TELEGRAM_APP_HASH=${TELEGRAM_APP_HASH}
+      - TELEGRAM_SESSION_FILE=/app/session/session.json
+      - PHONE_NUMBER=${PHONE_NUMBER}
+      - PASSWORD=${PASSWORD}
+      - JWT_SECRET=${JWT_SECRET}
+      
+      # Database Configuration (Connect to your gothub_db container)
+      - DB_HOST=gothub_db
+      - DB_USER=${DB_USER}
+      - DB_PASS=${DB_PASS}
+      - DB_NAME=${DB_NAME}
+      - DB_PORT=${DB_PORT}
+    volumes:
+      - ./session:/app/session
+      - .env:/app/.env
+    networks:
+      - shared-network
+    stdin_open: true # Required for interactive OTP entry
+    tty: true        # Required for interactive OTP entry
+
+networks:
+  shared-network:
+    external: true
+    name: shared-network
