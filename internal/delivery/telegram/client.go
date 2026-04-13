@@ -42,7 +42,8 @@ func (c *TelegramClient) Reply(ctx context.Context, peer tg.InputPeerClass, mess
 func (c *TelegramClient) GetGroups(ctx context.Context) ([]domain.GroupInfo, error) {
 	raw := tg.NewClient(c.Client)
 	dialogs, err := raw.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
-		Limit: 100,
+		OffsetPeer: &tg.InputPeerEmpty{},
+		Limit:      100,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("telegram rpc error: %w", err)

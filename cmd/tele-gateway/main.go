@@ -77,6 +77,15 @@ func main() {
 
 	// Run Telegram Client
 	if err := tgClient.Client.Run(ctx, func(ctx context.Context) error {
+		// Check if already authenticated inside Run to avoid deadlock
+		status, err := tgClient.Client.Auth().Status(ctx)
+		if err == nil && status.Authorized {
+			auctionUC.SetStatus("RUNNING")
+			logger.Info("Existing session found, bot is authorized")
+		} else {
+			logger.Info("No active session found, awaiting login/OTP")
+		}
+
 		flow := auth.NewFlow(
 			auth.Constant(os.Getenv("PHONE_NUMBER"), os.Getenv("PASSWORD"), auth.CodeAuthenticatorFunc(func(ctx context.Context, sentCode *tg.AuthSentCode) (string, error) {
 				logger.Info("Waiting for OTP from Frontend/Console...")
@@ -103,6 +112,7 @@ func main() {
 			return err
 		}
 
+		auctionUC.SetStatus("RUNNING")
 		logger.Info("Userbot is running and monitoring...")
 		<-ctx.Done()
 		return nil

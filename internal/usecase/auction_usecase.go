@@ -94,6 +94,10 @@ func (u *auctionUseCase) GetStatus() string {
 	return u.status
 }
 
+func (u *auctionUseCase) SetStatus(status string) {
+	u.status = status
+}
+
 func (u *auctionUseCase) SyncGroups(ctx context.Context) error {
 	if u.status != "RUNNING" {
 		return errors.New("bot is not fully running yet. please ensure login/OTP is completed")
@@ -123,7 +127,6 @@ func (u *auctionUseCase) GetAllGroups() ([]domain.TelegramGroup, error) {
 // Internal method for Gotd Auth Flow
 func (u *auctionUseCase) WaitOTP(ctx context.Context) (string, error) {
 	u.status = "WAITING_OTP"
-	defer func() { u.status = "RUNNING" }()
 	
 	select {
 	case code := <-u.otpChan:

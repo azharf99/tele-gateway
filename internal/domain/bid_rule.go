@@ -42,6 +42,7 @@ type AuctionUseCase interface {
 	GetAllRules() ([]BidRule, error)
 	SubmitOTP(code string) error
 	GetStatus() string // "WAITING_OTP", "RUNNING", "IDLE"
+	SetStatus(status string)
 
 	// Groups Management
 	SyncGroups(ctx context.Context) error
