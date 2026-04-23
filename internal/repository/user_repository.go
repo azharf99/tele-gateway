@@ -35,3 +35,7 @@ func (r *userRepository) FindByID(id uint) (*domain.User, error) {
 	}
 	return &user, nil
 }
+
+func (r *userRepository) Update(user *domain.User) error {
+	return r.db.Save(user).Error
+}

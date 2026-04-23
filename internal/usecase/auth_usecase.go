@@ -69,9 +69,33 @@ func (u *authUseCase) generateToken(user *domain.User, duration time.Duration, s
 	claims := jwt.MapClaims{
 		"user_id": user.ID,
 		"role":    user.Role,
+		"name":    user.Name,
+		"email":   user.Email,
 		"exp":     time.Now().Add(duration).Unix(),
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString([]byte(secret))
+}
+
+func (u *authUseCase) UpdateProfile(id uint, email *string, password *string) error {
+	user, err := u.userRepo.FindByID(id)
+	if err != nil {
+		return errors.New("user not found")
+	}
+
+	if email != nil && *email != "" {
+		// optionally validate email format here
+		user.Email = *email
+	}
+
+	if password != nil && *password != "" {
+		hashedPassword, err := bcrypt.GenerateFromPassword([]byte(*password), bcrypt.DefaultCost)
+		if err != nil {
+			return errors.New("failed to hash password")
+		}
+		user.Password = string(hashedPassword)
+	}
+
+	return u.userRepo.Update(user)
 }

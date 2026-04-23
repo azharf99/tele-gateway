@@ -1,6 +1,7 @@
 services:
   tele-gateway:
-    build: .
+    # build: .
+    image: azharfa/tele-gateway:latest
     container_name: tele-gateway
     restart: always
     ports:

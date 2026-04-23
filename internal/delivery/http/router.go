@@ -43,6 +43,9 @@ func InitRouter(authHandler *AuthHandler, bidHandler *BidHandler) *gin.Engine {
 	api := r.Group("/api")
 	api.Use(AuthMiddleware())
 	{
+		// Profile Management
+		api.PUT("/profile", authHandler.UpdateProfile)
+
 		// Bid Rules Management
 		api.GET("/rules", bidHandler.GetAllRules)
 		api.POST("/rules", RoleMiddleware(domain.RoleAdmin), bidHandler.CreateRule)

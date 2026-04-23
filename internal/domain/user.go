@@ -29,9 +29,11 @@ type UserRepository interface {
 	Create(user *User) error
 	FindByEmail(email string) (*User, error)
 	FindByID(id uint) (*User, error)
+	Update(user *User) error
 }
 
 type AuthUseCase interface {
 	Login(email, password string) (string, string, error) // AccessToken, RefreshToken, Error
 	RefreshToken(token string) (string, error)
+	UpdateProfile(id uint, email *string, password *string) error
 }
