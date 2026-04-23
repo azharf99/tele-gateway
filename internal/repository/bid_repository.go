@@ -17,6 +17,15 @@ func NewBidRepository(db *gorm.DB) domain.BidRepository {
 }
 
 func (r *bidRepository) Create(rule *domain.BidRule) error {
+	var existing domain.BidRule
+	err := r.db.Unscoped().Where("keyword = ?", rule.Keyword).First(&existing).Error
+	if err == nil && existing.DeletedAt.Valid {
+		// Recover the soft-deleted record
+		rule.ID = existing.ID
+		rule.CreatedAt = existing.CreatedAt
+		// We use Save to update all fields and clear DeletedAt
+		return r.db.Unscoped().Model(rule).Select("*").Updates(rule).Update("deleted_at", nil).Error
+	}
 	return r.db.Create(rule).Error
 }
 
@@ -25,7 +34,7 @@ func (r *bidRepository) Update(rule *domain.BidRule) error {
 }
 
 func (r *bidRepository) Delete(id uint) error {
-	return r.db.Delete(&domain.BidRule{}, id).Error
+	return r.db.Unscoped().Delete(&domain.BidRule{}, id).Error
 }
 
 func (r *bidRepository) FindByID(id uint) (*domain.BidRule, error) {
