@@ -36,8 +36,8 @@ func InitRouter(authHandler *AuthHandler, bidHandler *BidHandler) *gin.Engine {
 	}))
 
 	// Public Routes
-	r.POST("/login", authHandler.Login)
-	r.POST("/refresh", authHandler.RefreshToken)
+	r.POST("/api/login", authHandler.Login)
+	r.POST("/api/refresh", authHandler.RefreshToken)
 
 	// Protected Routes
 	api := r.Group("/api")
