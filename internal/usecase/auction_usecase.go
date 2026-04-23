@@ -32,7 +32,7 @@ func NewAuctionUseCase(repo domain.BidRepository, groupRepo domain.TelegramGroup
 		GroupRepo: groupRepo,
 		TgClient:  tgClient,
 		Logger:    logger,
-		otpChan:   make(chan string),
+		otpChan:   make(chan string, 1),
 		status:    "IDLE",
 	}
 }
@@ -111,8 +111,15 @@ func (u *auctionUseCase) SubmitOTP(code string) error {
 	if u.status != "WAITING_OTP" {
 		return errors.New("not waiting for OTP")
 	}
-	u.otpChan <- code
-	return nil
+
+	// Gunakan select dengan timeout agar tidak blocking selamanya (Deadlock)
+	// jika WaitOTP sudah ter-cancel atau timeout
+	select {
+	case u.otpChan <- code:
+		return nil
+	case <-time.After(2 * time.Second):
+		return errors.New("timeout: bot is not receiving OTP right now")
+	}
 }
 
 func (u *auctionUseCase) GetStatus() string {
@@ -159,7 +166,14 @@ func (u *auctionUseCase) GetTopicsByGroup(ctx context.Context, groupID int64) ([
 // Internal method for Gotd Auth Flow
 func (u *auctionUseCase) WaitOTP(ctx context.Context) (string, error) {
 	u.status = "WAITING_OTP"
-	
+
+	// Pastikan status di-reset jika gagal/timeout, agar tidak nyangkut di WAITING_OTP
+	defer func() {
+		if u.status == "WAITING_OTP" {
+			u.status = "IDLE"
+		}
+	}()
+
 	select {
 	case code := <-u.otpChan:
 		return code, nil
