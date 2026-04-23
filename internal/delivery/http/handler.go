@@ -115,6 +115,29 @@ func (h *BidHandler) CreateRule(c *gin.Context) {
 	c.JSON(http.StatusCreated, rule)
 }
 
+func (h *BidHandler) UpdateRule(c *gin.Context) {
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		return
+	}
+
+	var rule domain.BidRule
+	if err := c.ShouldBindJSON(&rule); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	rule.ID = uint(id)
+
+	if err := h.auctionUseCase.UpdateRule(&rule); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, rule)
+}
+
 func (h *BidHandler) GetAllRules(c *gin.Context) {
 	rules, err := h.auctionUseCase.GetAllRules()
 	if err != nil {

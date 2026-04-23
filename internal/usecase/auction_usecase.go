@@ -96,7 +96,20 @@ func (u *auctionUseCase) CreateRule(rule *domain.BidRule) error {
 }
 
 func (u *auctionUseCase) UpdateRule(rule *domain.BidRule) error {
-	return u.Repo.Update(rule)
+	existing, err := u.Repo.FindByID(rule.ID)
+	if err != nil {
+		return err
+	}
+
+	existing.TargetGroupID = rule.TargetGroupID
+	existing.TopicID = rule.TopicID
+	existing.Keyword = rule.Keyword
+	existing.BidMessage = rule.BidMessage
+	existing.IsActive = rule.IsActive
+	existing.HasBidded = rule.HasBidded
+	existing.StopKeywords = rule.StopKeywords
+
+	return u.Repo.Update(existing)
 }
 
 func (u *auctionUseCase) DeleteRule(id uint) error {

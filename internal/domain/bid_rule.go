@@ -10,13 +10,13 @@ import (
 
 type BidRule struct {
 	gorm.Model
-	TargetGroupID int64  `gorm:"index"`       // ID Grup Lelang
-	TopicID       int    `gorm:"default:0"`   // ID Topic (Forum Thread) jika ada. 0 berarti topic umum.
-	Keyword       string `gorm:"uniqueIndex"` // Contoh: "iPhone 13 Pro"
-	BidMessage    string // Pesan bid: "OB", "Bid 500k", dll
-	IsActive      bool   `gorm:"default:true"`  // Bisa dimatikan manual via DB
-	HasBidded     bool   `gorm:"default:false"` // Mencegah spam bid berkali-kali
-	StopKeywords  string // Contoh: "Sold", "Closed" (Separated by comma)
+	TargetGroupID int64  `gorm:"index" json:"target_group_id"`       // ID Grup Lelang
+	TopicID       int    `gorm:"default:0" json:"topic_id"`          // ID Topic (Forum Thread) jika ada. 0 berarti topic umum.
+	Keyword       string `gorm:"uniqueIndex" json:"keyword"`         // Contoh: "iPhone 13 Pro"
+	BidMessage    string `json:"bid_message"`                        // Pesan bid: "OB", "Bid 500k", dll
+	IsActive      bool   `gorm:"default:true" json:"is_active"`      // Bisa dimatikan manual via DB
+	HasBidded     bool   `gorm:"default:false" json:"has_bidded"`    // Mencegah spam bid berkali-kali
+	StopKeywords  string `json:"stop_keywords"`                      // Contoh: "Sold", "Closed" (Separated by comma)
 }
 
 type BidRepository interface {

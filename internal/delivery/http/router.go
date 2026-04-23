@@ -52,6 +52,7 @@ func InitRouter(authHandler *AuthHandler, bidHandler *BidHandler) *gin.Engine {
 		// Bid Rules Management
 		protected.GET("/rules", bidHandler.GetAllRules)
 		protected.POST("/rules", RoleMiddleware(domain.RoleAdmin), bidHandler.CreateRule)
+		protected.PUT("/rules/:id", RoleMiddleware(domain.RoleAdmin), bidHandler.UpdateRule)
 		protected.DELETE("/rules/:id", RoleMiddleware(domain.RoleAdmin), bidHandler.DeleteRule)
 
 		// Bot Management
