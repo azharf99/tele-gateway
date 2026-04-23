@@ -22,56 +22,96 @@ func (h *AuctionHandler) OnNewMessage(ctx context.Context, entities tg.Entities,
 	}
 
 	text := msg.Message
+	topicID := extractTopicID(msg)
 
-	// logic 1: Cek apakah ada barang baru yang dilelang
-	rule, err := h.UseCase.CheckKeyword(text)
-	if err == nil && rule != nil && !rule.HasBidded {
-		h.Logger.Info("Keyword detected", zap.String("keyword", rule.Keyword), zap.String("text", text))
-
-		delay := time.Duration(rand.Intn(3000)+2000) * time.Millisecond
-		time.Sleep(delay)
-
-		// Manual Extract InputPeer
-		var peer tg.InputPeerClass
-		switch p := msg.PeerID.(type) {
-		case *tg.PeerUser:
-			user, ok := entities.Users[p.UserID]
-			if !ok {
-				h.Logger.Error("User not found in entities", zap.Int64("user_id", p.UserID))
-				return nil
-			}
-			peer = &tg.InputPeerUser{
-				UserID:     user.ID,
-				AccessHash: user.AccessHash,
-			}
-		case *tg.PeerChat:
-			peer = &tg.InputPeerChat{
-				ChatID: p.ChatID,
-			}
-		case *tg.PeerChannel:
-			channel, ok := entities.Channels[p.ChannelID]
-			if !ok {
-				h.Logger.Error("Channel not found in entities", zap.Int64("channel_id", p.ChannelID))
-				return nil
-			}
-			peer = &tg.InputPeerChannel{
-				ChannelID:  channel.ID,
-				AccessHash: channel.AccessHash,
-			}
-		}
-
-		if peer == nil {
-			h.Logger.Error("Failed to resolve input peer")
+	// Manual Extract InputPeer
+	var peer tg.InputPeerClass
+	var groupID int64
+	switch p := msg.PeerID.(type) {
+	case *tg.PeerUser:
+		groupID = p.UserID
+		user, ok := entities.Users[p.UserID]
+		if !ok {
+			h.Logger.Error("User not found in entities", zap.Int64("user_id", p.UserID))
 			return nil
 		}
-
-		err = h.UseCase.ExecuteBid(ctx, peer, rule)
-		if err != nil {
-			h.Logger.Error("Failed to execute bid", zap.Error(err))
+		peer = &tg.InputPeerUser{
+			UserID:     user.ID,
+			AccessHash: user.AccessHash,
 		}
-		return err
+	case *tg.PeerChat:
+		groupID = p.ChatID
+		peer = &tg.InputPeerChat{
+			ChatID: p.ChatID,
+		}
+	case *tg.PeerChannel:
+		groupID = p.ChannelID
+		channel, ok := entities.Channels[p.ChannelID]
+		if !ok {
+			h.Logger.Error("Channel not found in entities", zap.Int64("channel_id", p.ChannelID))
+			return nil
+		}
+		peer = &tg.InputPeerChannel{
+			ChannelID:  channel.ID,
+			AccessHash: channel.AccessHash,
+		}
+	}
+
+	if peer == nil {
+		h.Logger.Error("Failed to resolve input peer")
+		return nil
+	}
+
+	h.Logger.Debug("Incoming message context",
+		zap.Int64("group_id", groupID),
+		zap.Int("topic_id", topicID),
+	)
+
+	// Cek StopKeyword terlebih dahulu dari semua rule aktif di grup/topik ini
+	err := h.UseCase.CheckAndStopByText(ctx, text, groupID, topicID)
+	if err != nil {
+		h.Logger.Error("Failed to check stop keywords", zap.Error(err))
+	}
+
+	// logic 1: Cek apakah ada barang baru yang dilelang
+	rule, err := h.UseCase.CheckKeyword(text, groupID, topicID)
+	if err == nil && rule != nil && !rule.HasBidded {
+		h.Logger.Info("Keyword detected, scheduling bid...", zap.String("keyword", rule.Keyword), zap.Int("topic_id", topicID), zap.Int("msg_id", msg.ID))
+
+		// Eksekusi secara asynchronous agar tidak memblokir update handler dan menghindari memory leak
+		go func(r *domain.BidRule, p tg.InputPeerClass, mID int) {
+			delay := time.Duration(rand.Intn(3000)+2000) * time.Millisecond
+			time.Sleep(delay)
+
+			// Gunakan context.Background() karena ctx dari handler mungkin sudah di-cancel
+			err := h.UseCase.ExecuteBid(context.Background(), p, mID, r)
+			if err != nil {
+				h.Logger.Error("Failed to execute bid", zap.Error(err))
+			}
+		}(rule, peer, msg.ID)
+
+		return nil
 	}
 	return nil
+}
+
+func extractTopicID(msg *tg.Message) int {
+	if msg == nil {
+		return 0
+	}
+
+	if msg.ReplyTo != nil {
+		if header, ok := msg.ReplyTo.(*tg.MessageReplyHeader); ok {
+			if header.ReplyToTopID > 0 {
+				return header.ReplyToTopID
+			}
+			if header.ForumTopic && header.ReplyToMsgID > 0 {
+				return header.ReplyToMsgID
+			}
+		}
+	}
+
+	return 0
 }
 
 // Implementasi UpdateHandler dari gotd

@@ -11,6 +11,7 @@ import (
 type BidRule struct {
 	gorm.Model
 	TargetGroupID int64  `gorm:"index"`       // ID Grup Lelang
+	TopicID       int    `gorm:"default:0"`   // ID Topic (Forum Thread) jika ada. 0 berarti topic umum.
 	Keyword       string `gorm:"uniqueIndex"` // Contoh: "iPhone 13 Pro"
 	BidMessage    string // Pesan bid: "OB", "Bid 500k", dll
 	IsActive      bool   `gorm:"default:true"`  // Bisa dimatikan manual via DB
@@ -24,17 +25,19 @@ type BidRepository interface {
 	Delete(id uint) error
 	FindByID(id uint) (*BidRule, error)
 	FindAll() ([]BidRule, error)
-	GetActiveRuleByKeyword(keyword string) (*BidRule, error)
+	GetActiveRuleByKeyword(keyword string, groupID int64, topicID int) (*BidRule, error) // Added groupID and topicID
 	MarkAsBidded(id uint) error
 	DeactivateRule(id uint) error
 	CheckStopKeyword(id uint, text string) (bool, error)
+	GetActiveRulesByGroup(groupID int64, topicID int) ([]BidRule, error)
 }
 
 type AuctionUseCase interface {
-	CheckKeyword(text string) (*BidRule, error)
-	ExecuteBid(ctx context.Context, peer tg.InputPeerClass, rule *BidRule) error
+	CheckKeyword(text string, groupID int64, topicID int) (*BidRule, error)                   // Added groupID and topicID
+	ExecuteBid(ctx context.Context, peer tg.InputPeerClass, msgID int, rule *BidRule) error // Changed topicID to msgID
 	CheckAndStop(ctx context.Context, text string, ruleID uint) error
-	
+	CheckAndStopByText(ctx context.Context, text string, groupID int64, topicID int) error
+
 	// API Methods
 	CreateRule(rule *BidRule) error
 	UpdateRule(rule *BidRule) error
@@ -47,4 +50,5 @@ type AuctionUseCase interface {
 	// Groups Management
 	SyncGroups(ctx context.Context) error
 	GetAllGroups() ([]TelegramGroup, error)
+	GetTopicsByGroup(ctx context.Context, groupID int64) ([]TopicInfo, error)
 }

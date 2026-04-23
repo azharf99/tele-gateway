@@ -29,12 +29,12 @@ func (u *authUseCase) Login(email, password string) (string, string, error) {
 		return "", "", errors.New("invalid credentials")
 	}
 
-	accessToken, err := u.generateToken(user, 15*time.Minute)
+	accessToken, err := u.generateToken(user, 15*time.Minute, os.Getenv("JWT_SECRET"))
 	if err != nil {
 		return "", "", err
 	}
 
-	refreshToken, err := u.generateToken(user, 7*24*time.Hour)
+	refreshToken, err := u.generateToken(user, 7*24*time.Hour, os.Getenv("JWT_REFRESH_SECRET"))
 	if err != nil {
 		return "", "", err
 	}
@@ -44,7 +44,7 @@ func (u *authUseCase) Login(email, password string) (string, string, error) {
 
 func (u *authUseCase) RefreshToken(tokenString string) (string, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		return []byte(os.Getenv("JWT_SECRET")), nil
+		return []byte(os.Getenv("JWT_REFRESH_SECRET")), nil
 	})
 
 	if err != nil || !token.Valid {
@@ -62,10 +62,10 @@ func (u *authUseCase) RefreshToken(tokenString string) (string, error) {
 		return "", err
 	}
 
-	return u.generateToken(user, 15*time.Minute)
+	return u.generateToken(user, 15*time.Minute, os.Getenv("JWT_SECRET"))
 }
 
-func (u *authUseCase) generateToken(user *domain.User, duration time.Duration) (string, error) {
+func (u *authUseCase) generateToken(user *domain.User, duration time.Duration, secret string) (string, error) {
 	claims := jwt.MapClaims{
 		"user_id": user.ID,
 		"role":    user.Role,
@@ -73,5 +73,5 @@ func (u *authUseCase) generateToken(user *domain.User, duration time.Duration) (
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(os.Getenv("JWT_SECRET")))
+	return token.SignedString([]byte(secret))
 }

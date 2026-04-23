@@ -13,7 +13,10 @@ services:
       - PHONE_NUMBER=${PHONE_NUMBER}
       - PASSWORD=${PASSWORD}
       - JWT_SECRET=${JWT_SECRET}
-      
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+      - GIN_MODE=release
+
       # Database Configuration (Connect to your gothub_db container)
       - DB_HOST=gothub_db
       - DB_USER=${DB_USER}
@@ -26,7 +29,7 @@ services:
     networks:
       - shared-network
     stdin_open: true # Required for interactive OTP entry
-    tty: true        # Required for interactive OTP entry
+    tty: true # Required for interactive OTP entry
 
 networks:
   shared-network:

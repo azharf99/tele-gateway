@@ -40,13 +40,30 @@ func (r *bidRepository) FindAll() ([]domain.BidRule, error) {
 	return rules, err
 }
 
-func (r *bidRepository) GetActiveRuleByKeyword(keyword string) (*domain.BidRule, error) {
-	var rule domain.BidRule
-	err := r.db.Where("LOWER(?) LIKE LOWER(CONCAT('%', keyword, '%')) AND is_active = ?", keyword, true).First(&rule).Error
-	if err != nil {
+func (r *bidRepository) GetActiveRuleByKeyword(keyword string, groupID int64, topicID int) (*domain.BidRule, error) {
+	var rules []domain.BidRule
+	query := r.db.Where("is_active = ? AND target_group_id = ?", true, groupID)
+
+	// topic_id=0 artinya rule global untuk group tersebut.
+	if topicID > 0 {
+		query = query.Where("(topic_id = ? OR topic_id = 0)", topicID)
+	} else {
+		query = query.Where("topic_id = 0")
+	}
+
+	if err := query.Order("topic_id desc, id asc").Find(&rules).Error; err != nil {
 		return nil, err
 	}
-	return &rule, nil
+
+	textLower := strings.ToLower(keyword)
+	for _, rule := range rules {
+		if strings.Contains(textLower, strings.ToLower(strings.TrimSpace(rule.Keyword))) {
+			matched := rule
+			return &matched, nil
+		}
+	}
+
+	return nil, gorm.ErrRecordNotFound
 }
 
 func (r *bidRepository) MarkAsBidded(id uint) error {
@@ -76,4 +93,18 @@ func (r *bidRepository) CheckStopKeyword(id uint, text string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+func (r *bidRepository) GetActiveRulesByGroup(groupID int64, topicID int) ([]domain.BidRule, error) {
+	var rules []domain.BidRule
+	query := r.db.Where("is_active = ? AND target_group_id = ?", true, groupID)
+
+	if topicID > 0 {
+		query = query.Where("(topic_id = ? OR topic_id = 0)", topicID)
+	} else {
+		query = query.Where("topic_id = 0")
+	}
+
+	err := query.Find(&rules).Error
+	return rules, err
 }

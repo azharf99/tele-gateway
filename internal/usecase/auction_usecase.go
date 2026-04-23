@@ -12,8 +12,9 @@ import (
 )
 
 type TelegramService interface {
-	Reply(ctx context.Context, peer tg.InputPeerClass, message string) error
+	Reply(ctx context.Context, peer tg.InputPeerClass, msgID int, message string) error
 	GetGroups(ctx context.Context) ([]domain.GroupInfo, error)
+	GetTopics(ctx context.Context, groupID int64) ([]domain.TopicInfo, error)
 }
 
 type auctionUseCase struct {
@@ -36,22 +37,46 @@ func NewAuctionUseCase(repo domain.BidRepository, groupRepo domain.TelegramGroup
 	}
 }
 
-func (u *auctionUseCase) CheckKeyword(text string) (*domain.BidRule, error) {
-	return u.Repo.GetActiveRuleByKeyword(text)
+func (u *auctionUseCase) CheckKeyword(text string, groupID int64, topicID int) (*domain.BidRule, error) {
+	return u.Repo.GetActiveRuleByKeyword(text, groupID, topicID)
 }
 
-func (u *auctionUseCase) ExecuteBid(ctx context.Context, peer tg.InputPeerClass, rule *domain.BidRule) error {
-	if rule.HasBidded || !rule.IsActive {
-		return nil
-	}
-
-	u.Logger.Info("Sending bid message...", zap.String("keyword", rule.Keyword), zap.String("bid_message", rule.BidMessage))
-	err := u.TgClient.Reply(ctx, peer, rule.BidMessage)
+func (u *auctionUseCase) ExecuteBid(ctx context.Context, peer tg.InputPeerClass, msgID int, rule *domain.BidRule) error {
+	// Re-fetch the rule from DB to prevent race conditions during delay
+	latestRule, err := u.Repo.FindByID(rule.ID)
 	if err != nil {
 		return err
 	}
 
-	return u.Repo.MarkAsBidded(rule.ID)
+	if latestRule.HasBidded || !latestRule.IsActive {
+		u.Logger.Info("Bid cancelled because rule is no longer active or already bidded", zap.Uint("rule_id", rule.ID))
+		return nil
+	}
+
+	u.Logger.Info("Sending bid message...", zap.String("keyword", latestRule.Keyword), zap.String("bid_message", latestRule.BidMessage), zap.Int("msg_id", msgID))
+	err = u.TgClient.Reply(ctx, peer, msgID, latestRule.BidMessage)
+	if err != nil {
+		return err
+	}
+
+	return u.Repo.MarkAsBidded(latestRule.ID)
+}
+
+func (u *auctionUseCase) CheckAndStopByText(ctx context.Context, text string, groupID int64, topicID int) error {
+	rules, err := u.Repo.GetActiveRulesByGroup(groupID, topicID)
+	if err != nil {
+		return err
+	}
+
+	for _, r := range rules {
+		if r.StopKeywords != "" {
+			err := u.CheckAndStop(ctx, text, r.ID)
+			if err != nil {
+				u.Logger.Error("Failed to check and stop rule", zap.Uint("rule_id", r.ID), zap.Error(err))
+			}
+		}
+	}
+	return nil
 }
 
 func (u *auctionUseCase) CheckAndStop(ctx context.Context, text string, ruleID uint) error {
@@ -122,6 +147,13 @@ func (u *auctionUseCase) SyncGroups(ctx context.Context) error {
 
 func (u *auctionUseCase) GetAllGroups() ([]domain.TelegramGroup, error) {
 	return u.GroupRepo.FindAll()
+}
+
+func (u *auctionUseCase) GetTopicsByGroup(ctx context.Context, groupID int64) ([]domain.TopicInfo, error) {
+	if u.status != "RUNNING" {
+		return nil, errors.New("bot is not fully running yet. please ensure login/OTP is completed")
+	}
+	return u.TgClient.GetTopics(ctx, groupID)
 }
 
 // Internal method for Gotd Auth Flow
