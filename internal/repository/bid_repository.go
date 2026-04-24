@@ -2,6 +2,7 @@
 package repository
 
 import (
+	"regexp"
 	"strings"
 
 	"github.com/azharf99/tele-gateway/internal/domain"
@@ -64,9 +65,33 @@ func (r *bidRepository) GetActiveRuleByKeyword(keyword string, groupID int64, to
 		return nil, err
 	}
 
-	textLower := strings.ToLower(keyword)
 	for _, rule := range rules {
-		if strings.Contains(textLower, strings.ToLower(strings.TrimSpace(rule.Keyword))) {
+		ruleKeywords := strings.Split(rule.Keyword, ",")
+		allMatched := true
+
+		for _, k := range ruleKeywords {
+			pattern := strings.TrimSpace(k)
+			if pattern == "" {
+				continue
+			}
+
+			// Try to compile as regex (case-insensitive)
+			re, err := regexp.Compile("(?i)" + pattern)
+			if err == nil {
+				if !re.MatchString(keyword) {
+					allMatched = false
+					break
+				}
+			} else {
+				// Fallback to simple substring
+				if !strings.Contains(strings.ToLower(keyword), strings.ToLower(pattern)) {
+					allMatched = false
+					break
+				}
+			}
+		}
+
+		if allMatched {
 			matched := rule
 			return &matched, nil
 		}
@@ -95,10 +120,21 @@ func (r *bidRepository) CheckStopKeyword(id uint, text string) (bool, error) {
 	}
 
 	keywords := strings.Split(rule.StopKeywords, ",")
-	textLower := strings.ToLower(text)
 	for _, k := range keywords {
-		if strings.Contains(textLower, strings.TrimSpace(strings.ToLower(k))) {
-			return true, nil
+		pattern := strings.TrimSpace(k)
+		if pattern == "" {
+			continue
+		}
+
+		re, err := regexp.Compile("(?i)" + pattern)
+		if err == nil {
+			if re.MatchString(text) {
+				return true, nil
+			}
+		} else {
+			if strings.Contains(strings.ToLower(text), strings.ToLower(pattern)) {
+				return true, nil
+			}
 		}
 	}
 	return false, nil
