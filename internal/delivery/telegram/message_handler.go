@@ -3,6 +3,7 @@ package telegram
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"time"
 
@@ -12,8 +13,9 @@ import (
 )
 
 type AuctionHandler struct {
-	UseCase domain.AuctionUseCase
-	Logger  *zap.Logger
+	UseCase   domain.AuctionUseCase
+	AIUseCase domain.AIGatewayUseCase
+	Logger    *zap.Logger
 }
 
 func (h *AuctionHandler) OnNewMessage(ctx context.Context, entities tg.Entities, msg *tg.Message) error {
@@ -27,14 +29,19 @@ func (h *AuctionHandler) OnNewMessage(ctx context.Context, entities tg.Entities,
 	// Manual Extract InputPeer
 	var peer tg.InputPeerClass
 	var groupID int64
+	var isPrivate bool
+	var senderName string
+
 	switch p := msg.PeerID.(type) {
 	case *tg.PeerUser:
+		isPrivate = true
 		groupID = p.UserID
 		user, ok := entities.Users[p.UserID]
 		if !ok {
 			h.Logger.Error("User not found in entities", zap.Int64("user_id", p.UserID))
 			return nil
 		}
+		senderName = fmt.Sprintf("%s %s", user.FirstName, user.LastName)
 		peer = &tg.InputPeerUser{
 			UserID:     user.ID,
 			AccessHash: user.AccessHash,
@@ -62,28 +69,40 @@ func (h *AuctionHandler) OnNewMessage(ctx context.Context, entities tg.Entities,
 		return nil
 	}
 
-	h.Logger.Debug("Incoming message context",
+	// Route to AI Gateway if it's a private message
+	if isPrivate && h.AIUseCase != nil {
+		replyFunc := func(replyText string) error {
+			return h.UseCase.ReplyToUser(context.Background(), peer, 0, replyText)
+		}
+		// Run in background to avoid blocking update handler
+		go func() {
+			err := h.AIUseCase.HandlePrivateMessage(context.Background(), groupID, senderName, text, replyFunc)
+			if err != nil {
+				h.Logger.Error("Failed to handle private message in AI Gateway", zap.Error(err))
+			}
+		}()
+		return nil
+	}
+
+	h.Logger.Debug("Incoming group/channel message",
 		zap.Int64("group_id", groupID),
 		zap.Int("topic_id", topicID),
 	)
 
-	// Cek StopKeyword terlebih dahulu dari semua rule aktif di grup/topik ini
+	// Existing Bidding Logic
 	err := h.UseCase.CheckAndStopByText(ctx, text, groupID, topicID)
 	if err != nil {
 		h.Logger.Error("Failed to check stop keywords", zap.Error(err))
 	}
 
-	// logic 1: Cek apakah ada barang baru yang dilelang
 	rule, err := h.UseCase.CheckKeyword(text, groupID, topicID)
 	if err == nil && rule != nil && !rule.HasBidded {
 		h.Logger.Info("Keyword detected, scheduling bid...", zap.String("keyword", rule.Keyword), zap.Int("topic_id", topicID), zap.Int("msg_id", msg.ID))
 
-		// Eksekusi secara asynchronous agar tidak memblokir update handler dan menghindari memory leak
 		go func(r *domain.BidRule, p tg.InputPeerClass, mID int) {
 			delay := time.Duration(rand.Intn(3000)+2000) * time.Millisecond
 			time.Sleep(delay)
 
-			// Gunakan context.Background() karena ctx dari handler mungkin sudah di-cancel
 			err := h.UseCase.ExecuteBid(context.Background(), p, mID, r)
 			if err != nil {
 				h.Logger.Error("Failed to execute bid", zap.Error(err))

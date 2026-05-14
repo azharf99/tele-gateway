@@ -196,3 +196,7 @@ func (u *auctionUseCase) WaitOTP(ctx context.Context) (string, error) {
 		return "", errors.New("OTP timeout")
 	}
 }
+
+func (u *auctionUseCase) ReplyToUser(ctx context.Context, peer tg.InputPeerClass, msgID int, message string) error {
+	return u.TgClient.Reply(ctx, peer, msgID, message)
+}

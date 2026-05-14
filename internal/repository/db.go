@@ -20,7 +20,7 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 	}
 
 	// Auto Migration
-	err = db.AutoMigrate(&domain.BidRule{}, &domain.User{}, &domain.TelegramGroup{})
+	err = db.AutoMigrate(&domain.BidRule{}, &domain.User{}, &domain.TelegramGroup{}, &domain.AIContext{})
 	if err != nil {
 		return nil, err
 	}

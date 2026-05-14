@@ -18,6 +18,7 @@ type Config struct {
 	DBPass      string
 	DBName      string
 	DBPort      string
+	GeminiAPIKey string
 }
 
 func LoadConfig() *Config {
@@ -37,5 +38,6 @@ func LoadConfig() *Config {
 		DBPass:      os.Getenv("DB_PASS"),
 		DBName:      os.Getenv("DB_NAME"),
 		DBPort:      os.Getenv("DB_PORT"),
+		GeminiAPIKey: os.Getenv("GEMINI_API_KEY"),
 	}
 }

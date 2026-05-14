@@ -11,7 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func InitRouter(authHandler *AuthHandler, bidHandler *BidHandler) *gin.Engine {
+func InitRouter(authHandler *AuthHandler, bidHandler *BidHandler, aiHandler *AIHandler) *gin.Engine {
 	r := gin.Default()
 
 	r.SetTrustedProxies(nil)
@@ -63,6 +63,10 @@ func InitRouter(authHandler *AuthHandler, bidHandler *BidHandler) *gin.Engine {
 		protected.GET("/groups", bidHandler.GetGroups)
 		protected.GET("/groups/:id/topics", bidHandler.GetGroupTopics)
 		protected.POST("/groups/sync", RoleMiddleware(domain.RoleAdmin), bidHandler.SyncGroups)
+
+		// AI Context Management
+		protected.POST("/ai/context", RoleMiddleware(domain.RoleAdmin), aiHandler.SetContext)
+		protected.GET("/ai/context", aiHandler.GetContext)
 	}
 
 	return r

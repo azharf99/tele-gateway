@@ -51,4 +51,5 @@ type AuctionUseCase interface {
 	SyncGroups(ctx context.Context) error
 	GetAllGroups() ([]TelegramGroup, error)
 	GetTopicsByGroup(ctx context.Context, groupID int64) ([]TopicInfo, error)
+	ReplyToUser(ctx context.Context, peer tg.InputPeerClass, msgID int, message string) error
 }

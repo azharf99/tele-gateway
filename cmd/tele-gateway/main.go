@@ -40,6 +40,7 @@ func main() {
 	userRepo := repository.NewUserRepository(db)
 	bidRepo := repository.NewBidRepository(db)
 	groupRepo := repository.NewTelegramGroupRepository(db)
+	aiRepo := repository.NewAIContextRepository(db)
 
 	// Create Default Admin if not exists
 	seedAdmin(userRepo, logger)
@@ -47,6 +48,12 @@ func main() {
 	handlerTg := &telegram.AuctionHandler{
 		Logger: logger,
 	}
+
+	aiUC, err := usecase.NewAIGatewayUseCase(aiRepo, cfg.GeminiAPIKey, logger)
+	if err != nil {
+		logger.Fatal("failed to init ai gateway usecase", zap.Error(err))
+	}
+	handlerTg.AIUseCase = aiUC
 
 	tgClient, err := telegram.NewTelegramClient(cfg.AppID, cfg.AppHash, cfg.SessionFile, handlerTg)
 	if err != nil {
@@ -61,7 +68,8 @@ func main() {
 	// 3. Init HTTP Delivery
 	authHandler := deliveryHttp.NewAuthHandler(authUC)
 	bidHandler := deliveryHttp.NewBidHandler(auctionUC)
-	router := deliveryHttp.InitRouter(authHandler, bidHandler)
+	aiHandler := deliveryHttp.NewAIHandler(aiUC)
+	router := deliveryHttp.InitRouter(authHandler, bidHandler, aiHandler)
 
 	// 4. Run Services
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
