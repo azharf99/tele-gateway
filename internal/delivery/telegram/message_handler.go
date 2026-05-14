@@ -136,7 +136,7 @@ func extractTopicID(msg *tg.Message) int {
 
 // Implementasi UpdateHandler dari gotd
 func (h *AuctionHandler) Handle(ctx context.Context, u tg.UpdatesClass) error {
-	h.Logger.Debug("Received update", zap.String("type", fmt.Sprintf("%T", u)))
+	h.Logger.Info("Received update", zap.String("type", fmt.Sprintf("%T", u)))
 	switch updates := u.(type) {
 	case *tg.UpdateShortMessage:
 		if updates.Out {
@@ -222,7 +222,27 @@ func (h *AuctionHandler) Handle(ctx context.Context, u tg.UpdatesClass) error {
 			}
 		}
 	case *tg.UpdateShort:
-		h.Logger.Debug("Unhandled short update type", zap.String("inner_type", fmt.Sprintf("%T", updates.Update)))
+		h.Logger.Info("Handling short update", zap.String("inner_type", fmt.Sprintf("%T", updates.Update)))
+		switch upd := updates.Update.(type) {
+		case *tg.UpdateNewMessage:
+			if msg, ok := upd.Message.(*tg.Message); ok {
+				// For UpdateShort, we don't have entities. We'll pass empty ones
+				// and OnNewMessage should handle it gracefully or we should fetch them.
+				_ = h.OnNewMessage(ctx, tg.Entities{
+					Users:    make(map[int64]*tg.User),
+					Chats:    make(map[int64]*tg.Chat),
+					Channels: make(map[int64]*tg.Channel),
+				}, msg)
+			}
+		case *tg.UpdateNewChannelMessage:
+			if msg, ok := upd.Message.(*tg.Message); ok {
+				_ = h.OnNewMessage(ctx, tg.Entities{
+					Users:    make(map[int64]*tg.User),
+					Chats:    make(map[int64]*tg.Chat),
+					Channels: make(map[int64]*tg.Channel),
+				}, msg)
+			}
+		}
 	default:
 		h.Logger.Warn("Unhandled update type", zap.String("type", fmt.Sprintf("%T", u)))
 	}
