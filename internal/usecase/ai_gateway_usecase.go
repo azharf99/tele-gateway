@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/azharf99/tele-gateway/internal/domain"
-	"google.golang.org/genai"
 	"go.uber.org/zap"
+	"google.golang.org/genai"
 )
 
 type userQueue struct {
@@ -92,7 +92,7 @@ func (u *aiGatewayUseCase) processQueue(senderID int64, q *userQueue, replyFunc 
 
 	batch := make([]string, limit)
 	copy(batch, q.messages[:limit])
-	
+
 	// Fix slice memory leak by allocating a new slice
 	q.messages = append([]string(nil), q.messages[limit:]...)
 
@@ -109,7 +109,7 @@ func (u *aiGatewayUseCase) processQueue(senderID int64, q *userQueue, replyFunc 
 
 	// Process the batch with AI
 	u.logger.Info("Processing AI batch", zap.Int64("sender_id", senderID), zap.Int("batch_size", len(batch)))
-	
+
 	// Get System Prompt from DB
 	systemPrompt := "You are a helpful assistant."
 	aiCtx, err := u.repo.Get("system_prompt")
@@ -118,12 +118,12 @@ func (u *aiGatewayUseCase) processQueue(senderID int64, q *userQueue, replyFunc 
 	}
 
 	combinedMessages := strings.Join(batch, "\n")
-	
+
 	// Prepare content for Gemini
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	// Using model gemini-2.5-flash
-	resp, err := u.genaiClient.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(fmt.Sprintf("%s\n\nUser messages:\n%s", systemPrompt, combinedMessages)), nil)
+	resp, err := u.genaiClient.Models.GenerateContent(ctx, "gemini-3.1-flash-lite", genai.Text(fmt.Sprintf("%s\n\nUser messages:\n%s", systemPrompt, combinedMessages)), nil)
 	if err != nil {
 		u.logger.Error("Gemini API error", zap.Error(err))
 		return // Do not send error message to avoid leaking sensitive info
