@@ -122,8 +122,8 @@ func (u *aiGatewayUseCase) processQueue(senderID int64, q *userQueue, replyFunc 
 	// Prepare content for Gemini
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// Using model gemini-1.5-flash
-	resp, err := u.genaiClient.Models.GenerateContent(ctx, "gemini-1.5-flash", genai.Text(fmt.Sprintf("%s\n\nUser messages:\n%s", systemPrompt, combinedMessages)), nil)
+	// Using model gemini-3.1-flash-lite
+	resp, err := u.genaiClient.Models.GenerateContent(ctx, "gemini-3.1-flash-lite", genai.Text(fmt.Sprintf("%s\n\nUser messages:\n%s", systemPrompt, combinedMessages)), nil)
 	if err != nil {
 		u.logger.Error("Gemini API error", zap.Error(err))
 		return // Do not send error message to avoid leaking sensitive info
