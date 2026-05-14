@@ -37,14 +37,20 @@ func (h *AuctionHandler) OnNewMessage(ctx context.Context, entities tg.Entities,
 		isPrivate = true
 		groupID = p.UserID
 		user, ok := entities.Users[p.UserID]
-		if !ok {
-			h.Logger.Error("User not found in entities", zap.Int64("user_id", p.UserID))
-			return nil
-		}
-		senderName = fmt.Sprintf("%s %s", user.FirstName, user.LastName)
-		peer = &tg.InputPeerUser{
-			UserID:     user.ID,
-			AccessHash: user.AccessHash,
+		if ok {
+			senderName = fmt.Sprintf("%s %s", user.FirstName, user.LastName)
+			peer = &tg.InputPeerUser{
+				UserID:     user.ID,
+				AccessHash: user.AccessHash,
+			}
+		} else {
+			// Fallback jika user tidak ada di entities (biasanya pada UpdateShort)
+			senderName = "User"
+			peer = &tg.InputPeerUser{
+				UserID:     p.UserID,
+				AccessHash: 0, // Akan dicoba resolusi otomatis oleh library sender
+			}
+			h.Logger.Info("User info missing in entities, using fallback", zap.Int64("user_id", p.UserID))
 		}
 	case *tg.PeerChat:
 		groupID = p.ChatID
@@ -136,7 +142,7 @@ func extractTopicID(msg *tg.Message) int {
 
 // Implementasi UpdateHandler dari gotd
 func (h *AuctionHandler) Handle(ctx context.Context, u tg.UpdatesClass) error {
-	h.Logger.Info("Received update", zap.String("type", fmt.Sprintf("%T", u)))
+	h.Logger.Info("Incoming UpdatesClass", zap.String("type", fmt.Sprintf("%T", u)))
 	switch updates := u.(type) {
 	case *tg.UpdateShortMessage:
 		if updates.Out {

@@ -58,7 +58,7 @@ func (c *TelegramClient) Start(ctx context.Context, phone, password string, logg
 		status, err := c.Client.Auth().Status(ctx)
 		if err == nil && status.Authorized {
 			onSuccess()
-			logger.Info("Bot is authorized")
+			logger.Info("Bot is authorized", zap.String("username", status.User.Username), zap.Int64("id", status.User.ID))
 		} else {
 			logger.Info("Awaiting login/OTP")
 		}
