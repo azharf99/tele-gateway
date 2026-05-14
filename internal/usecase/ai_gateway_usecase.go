@@ -47,8 +47,15 @@ func NewAIGatewayUseCase(repo domain.AIContextRepository, apiKey string, logger 
 }
 
 func (u *aiGatewayUseCase) HandlePrivateMessage(ctx context.Context, senderID int64, senderName string, text string, replyFunc func(string) error) error {
-	qRaw, _ := u.queues.LoadOrStore(senderID, &userQueue{})
-	q := qRaw.(*userQueue)
+	qRaw, ok := u.queues.Load(senderID)
+	var q *userQueue
+	if !ok {
+		q = &userQueue{}
+		qRaw, _ = u.queues.LoadOrStore(senderID, q)
+		q = qRaw.(*userQueue)
+	} else {
+		q = qRaw.(*userQueue)
+	}
 
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -61,22 +68,18 @@ func (u *aiGatewayUseCase) HandlePrivateMessage(ctx context.Context, senderID in
 	}
 
 	q.timer = time.AfterFunc(1*time.Minute, func() {
-		u.processQueue(senderID, replyFunc)
+		u.processQueue(senderID, q, replyFunc)
 	})
 
 	u.logger.Info("Message queued for AI", zap.Int64("sender_id", senderID), zap.String("sender_name", senderName))
 	return nil
 }
 
-func (u *aiGatewayUseCase) processQueue(senderID int64, replyFunc func(string) error) {
-	qRaw, ok := u.queues.Load(senderID)
-	if !ok {
-		return
-	}
-	q := qRaw.(*userQueue)
-
+func (u *aiGatewayUseCase) processQueue(senderID int64, q *userQueue, replyFunc func(string) error) {
 	q.mu.Lock()
 	if len(q.messages) == 0 {
+		q.timer = nil
+		u.queues.CompareAndDelete(senderID, q)
 		q.mu.Unlock()
 		return
 	}
@@ -87,16 +90,20 @@ func (u *aiGatewayUseCase) processQueue(senderID int64, replyFunc func(string) e
 		limit = len(q.messages)
 	}
 
-	batch := q.messages[:limit]
-	q.messages = q.messages[limit:]
+	batch := make([]string, limit)
+	copy(batch, q.messages[:limit])
+	
+	// Fix slice memory leak by allocating a new slice
+	q.messages = append([]string(nil), q.messages[limit:]...)
 
 	// If more than 10 messages remain, schedule another 1-minute timer (as per user request)
 	if len(q.messages) > 0 {
 		q.timer = time.AfterFunc(1*time.Minute, func() {
-			u.processQueue(senderID, replyFunc)
+			u.processQueue(senderID, q, replyFunc)
 		})
 	} else {
 		q.timer = nil
+		u.queues.CompareAndDelete(senderID, q)
 	}
 	q.mu.Unlock()
 
@@ -113,7 +120,8 @@ func (u *aiGatewayUseCase) processQueue(senderID int64, replyFunc func(string) e
 	combinedMessages := strings.Join(batch, "\n")
 	
 	// Prepare content for Gemini
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 	// Using model gemini-2.5-flash
 	resp, err := u.genaiClient.Models.GenerateContent(ctx, "gemini-2.5-flash", genai.Text(fmt.Sprintf("%s\n\nUser messages:\n%s", systemPrompt, combinedMessages)), nil)
 	if err != nil {
