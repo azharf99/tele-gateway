@@ -67,6 +67,11 @@ func (c *TelegramClient) Start(ctx context.Context, phone, password string, logg
 			return err
 		}
 
+		// Wajib memanggil UpdatesGetState agar server Telegram mulai mengirimkan push updates ke client ini
+		if _, err := tg.NewClient(c.Client).UpdatesGetState(ctx); err != nil {
+			logger.Warn("Failed to fetch initial updates state", zap.Error(err))
+		}
+
 		onSuccess()
 		logger.Info("Userbot is running...")
 		<-ctx.Done()

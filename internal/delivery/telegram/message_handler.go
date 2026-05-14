@@ -135,6 +135,7 @@ func extractTopicID(msg *tg.Message) int {
 
 // Implementasi UpdateHandler dari gotd
 func (h *AuctionHandler) Handle(ctx context.Context, u tg.UpdatesClass) error {
+	h.Logger.Debug("Received update", zap.String("type", fmt.Sprintf("%T", u)))
 	switch updates := u.(type) {
 	case *tg.UpdateShortMessage:
 		if updates.Out {
@@ -218,6 +219,8 @@ func (h *AuctionHandler) Handle(ctx context.Context, u tg.UpdatesClass) error {
 				}
 			}
 		}
+	default:
+		h.Logger.Warn("Unhandled update type", zap.String("type", fmt.Sprintf("%T", u)))
 	}
 	return nil
 }
