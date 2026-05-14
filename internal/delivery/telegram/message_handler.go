@@ -72,7 +72,7 @@ func (h *AuctionHandler) OnNewMessage(ctx context.Context, entities tg.Entities,
 	// Route to AI Gateway if it's a private message
 	if isPrivate && h.AIUseCase != nil {
 		replyFunc := func(replyText string) error {
-			return h.UseCase.ReplyToUser(context.Background(), peer, 0, replyText)
+			return h.UseCase.ReplyToUser(context.Background(), peer, msg.ID, replyText)
 		}
 		// Run in background to avoid blocking update handler
 		go func() {
@@ -136,7 +136,57 @@ func extractTopicID(msg *tg.Message) int {
 // Implementasi UpdateHandler dari gotd
 func (h *AuctionHandler) Handle(ctx context.Context, u tg.UpdatesClass) error {
 	switch updates := u.(type) {
+	case *tg.UpdateShortMessage:
+		if updates.Out {
+			return nil
+		}
+		if h.AIUseCase != nil {
+			peer := &tg.InputPeerUser{
+				UserID: updates.UserID,
+			}
+			replyFunc := func(replyText string) error {
+				return h.UseCase.ReplyToUser(context.Background(), peer, updates.ID, replyText)
+			}
+			go func() {
+				err := h.AIUseCase.HandlePrivateMessage(context.Background(), updates.UserID, "User", updates.Message, replyFunc)
+				if err != nil {
+					h.Logger.Error("Failed to handle short private message in AI Gateway", zap.Error(err))
+				}
+			}()
+		}
 	case *tg.Updates:
+		entities := tg.Entities{
+			Users:    make(map[int64]*tg.User),
+			Chats:    make(map[int64]*tg.Chat),
+			Channels: make(map[int64]*tg.Channel),
+		}
+
+		for _, userClass := range updates.GetUsers() {
+			if user, ok := userClass.(*tg.User); ok {
+				entities.Users[user.ID] = user
+			}
+		}
+		for _, chatClass := range updates.GetChats() {
+			if chat, ok := chatClass.(*tg.Chat); ok {
+				entities.Chats[chat.ID] = chat
+			} else if channel, ok := chatClass.(*tg.Channel); ok {
+				entities.Channels[channel.ID] = channel
+			}
+		}
+
+		for _, update := range updates.Updates {
+			switch upd := update.(type) {
+			case *tg.UpdateNewMessage:
+				if msg, ok := upd.Message.(*tg.Message); ok {
+					_ = h.OnNewMessage(ctx, entities, msg)
+				}
+			case *tg.UpdateNewChannelMessage:
+				if msg, ok := upd.Message.(*tg.Message); ok {
+					_ = h.OnNewMessage(ctx, entities, msg)
+				}
+			}
+		}
+	case *tg.UpdatesCombined:
 		entities := tg.Entities{
 			Users:    make(map[int64]*tg.User),
 			Chats:    make(map[int64]*tg.Chat),
