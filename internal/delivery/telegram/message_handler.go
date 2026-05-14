@@ -219,6 +219,8 @@ func (h *AuctionHandler) Handle(ctx context.Context, u tg.UpdatesClass) error {
 				}
 			}
 		}
+	case *tg.UpdateShort:
+		h.Logger.Debug("Unhandled short update type", zap.String("inner_type", fmt.Sprintf("%T", updates.Update)))
 	default:
 		h.Logger.Warn("Unhandled update type", zap.String("type", fmt.Sprintf("%T", u)))
 	}
