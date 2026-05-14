@@ -29,11 +29,21 @@ type UserRepository interface {
 	Create(user *User) error
 	FindByEmail(email string) (*User, error)
 	FindByID(id uint) (*User, error)
+	FindAll() ([]*User, error)
 	Update(user *User) error
+	Delete(id uint) error
+}
+
+type UserUseCase interface {
+	CreateUser(user *User) error
+	GetAllUsers() ([]*User, error)
+	GetUserByID(id uint) (*User, error)
+	UpdateUser(id uint, name *string, role *Role, password *string) error
+	DeleteUser(id uint) error
 }
 
 type AuthUseCase interface {
 	Login(email, password string) (string, string, error) // AccessToken, RefreshToken, Error
 	RefreshToken(token string) (string, error)
-	UpdateProfile(id uint, email *string, password *string) error
+	UpdateProfile(id uint, name *string, password *string) error
 }

@@ -1,4 +1,4 @@
-// internal/delivery/http/handler.go
+// internal/delivery/http/bid_handler.go
 package http
 
 import (
@@ -8,89 +8,6 @@ import (
 	"github.com/azharf99/tele-gateway/internal/domain"
 	"github.com/gin-gonic/gin"
 )
-
-type AuthHandler struct {
-	authUseCase domain.AuthUseCase
-}
-
-func NewAuthHandler(authUseCase domain.AuthUseCase) *AuthHandler {
-	return &AuthHandler{authUseCase: authUseCase}
-}
-
-func (h *AuthHandler) Login(c *gin.Context) {
-	var req struct {
-		Email    string `json:"email" binding:"required"`
-		Password string `json:"password" binding:"required"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	accessToken, refreshToken, err := h.authUseCase.Login(req.Email, req.Password)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"access_token":  accessToken,
-		"refresh_token": refreshToken,
-	})
-}
-
-func (h *AuthHandler) RefreshToken(c *gin.Context) {
-	var req struct {
-		RefreshToken string `json:"refresh_token" binding:"required"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	accessToken, err := h.authUseCase.RefreshToken(req.RefreshToken)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"access_token": accessToken,
-	})
-}
-
-func (h *AuthHandler) UpdateProfile(c *gin.Context) {
-	userID, exists := c.Get("user_id")
-	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "User ID not found in context"})
-		return
-	}
-
-	var req struct {
-		Email    *string `json:"email,omitempty"`
-		Password *string `json:"password,omitempty"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	if (req.Email == nil || *req.Email == "") && (req.Password == nil || *req.Password == "") {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Please provide email or password to update"})
-		return
-	}
-
-	err := h.authUseCase.UpdateProfile(userID.(uint), req.Email, req.Password)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "Profile updated successfully"})
-}
 
 type BidHandler struct {
 	auctionUseCase domain.AuctionUseCase
@@ -209,46 +126,4 @@ func (h *BidHandler) GetGroupTopics(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, topics)
-}
-
-type AIHandler struct {
-	aiUseCase domain.AIGatewayUseCase
-}
-
-func NewAIHandler(aiUseCase domain.AIGatewayUseCase) *AIHandler {
-	return &AIHandler{aiUseCase: aiUseCase}
-}
-
-func (h *AIHandler) SetContext(c *gin.Context) {
-	var req struct {
-		Key   string `json:"key" binding:"required"`
-		Value string `json:"value" binding:"required"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	if err := h.aiUseCase.SetAIContext(req.Key, req.Value); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"message": "AI context updated"})
-}
-
-func (h *AIHandler) GetContext(c *gin.Context) {
-	key := c.Query("key")
-	if key == "" {
-		key = "system_prompt"
-	}
-
-	value, err := h.aiUseCase.GetAIContext(key)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Context not found"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{"key": key, "value": value})
 }

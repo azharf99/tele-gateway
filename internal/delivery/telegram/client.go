@@ -2,14 +2,18 @@
 package telegram
 
 import (
+	"bufio"
 	"context"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/azharf99/tele-gateway/internal/domain"
 	"github.com/gotd/td/telegram"
+	"github.com/gotd/td/telegram/auth"
 	"github.com/gotd/td/telegram/message"
 	"github.com/gotd/td/tg"
+	"go.uber.org/zap"
 )
 
 type TelegramClient struct {
@@ -29,6 +33,45 @@ func NewTelegramClient(appID int, appHash string, sessionPath string, handler te
 		Client: client,
 		Sender: message.NewSender(tg.NewClient(client)),
 	}, nil
+}
+
+func (c *TelegramClient) Start(ctx context.Context, phone, password string, logger *zap.Logger, otpProvider func(context.Context) (string, error), onSuccess func()) error {
+	flow := auth.NewFlow(
+		auth.Constant(phone, password, auth.CodeAuthenticatorFunc(func(ctx context.Context, sentCode *tg.AuthSentCode) (string, error) {
+			logger.Info("Waiting for OTP...")
+			if otpProvider != nil {
+				code, err := otpProvider(ctx)
+				if err == nil {
+					return code, nil
+				}
+				logger.Warn("Failed to get OTP from provider, falling back to Console", zap.Error(err))
+			}
+
+			fmt.Print("Enter code (Console Fallback): ")
+			code, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+			return strings.TrimSpace(code), nil
+		})),
+		auth.SendCodeOptions{},
+	)
+
+	return c.Client.Run(ctx, func(ctx context.Context) error {
+		status, err := c.Client.Auth().Status(ctx)
+		if err == nil && status.Authorized {
+			onSuccess()
+			logger.Info("Bot is authorized")
+		} else {
+			logger.Info("Awaiting login/OTP")
+		}
+
+		if err := c.Client.Auth().IfNecessary(ctx, flow); err != nil {
+			return err
+		}
+
+		onSuccess()
+		logger.Info("Userbot is running...")
+		<-ctx.Done()
+		return nil
+	})
 }
 
 // Implementasi interface TelegramService yang ada di usecase

@@ -78,15 +78,13 @@ func (u *authUseCase) generateToken(user *domain.User, duration time.Duration, s
 	return token.SignedString([]byte(secret))
 }
 
-func (u *authUseCase) UpdateProfile(id uint, email *string, password *string) error {
+func (u *authUseCase) UpdateProfile(id uint, name *string, password *string) error {
 	user, err := u.userRepo.FindByID(id)
 	if err != nil {
 		return errors.New("user not found")
 	}
-
-	if email != nil && *email != "" {
-		// optionally validate email format here
-		user.Email = *email
+	if name != nil && *name != "" {
+		user.Name = *name
 	}
 
 	if password != nil && *password != "" {

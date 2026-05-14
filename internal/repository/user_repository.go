@@ -36,6 +36,16 @@ func (r *userRepository) FindByID(id uint) (*domain.User, error) {
 	return &user, nil
 }
 
+func (r *userRepository) FindAll() ([]*domain.User, error) {
+	var users []*domain.User
+	err := r.db.Find(&users).Error
+	return users, err
+}
+
 func (r *userRepository) Update(user *domain.User) error {
 	return r.db.Save(user).Error
+}
+
+func (r *userRepository) Delete(id uint) error {
+	return r.db.Delete(&domain.User{}, id).Error
 }
