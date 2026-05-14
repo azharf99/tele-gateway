@@ -135,6 +135,8 @@ func (u *aiGatewayUseCase) processQueue(senderID int64, replyFunc func(string) e
 		return // Do not send empty response fallback
 	}
 
+	aiResponse = fmt.Sprintf("%s\n\n[Dibalas oleh Azhar's AI Assistant]", strings.TrimSpace(aiResponse))
+
 	err = replyFunc(aiResponse)
 	if err != nil {
 		u.logger.Error("Failed to send AI response", zap.Error(err))
