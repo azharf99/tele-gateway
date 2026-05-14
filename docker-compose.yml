@@ -16,14 +16,17 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET}
       - ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
-      - GIN_MODE=release
+      - GIN_MODE=${GIN_MODE}
 
       # Database Configuration (Connect to your gothub_db container)
-      - DB_HOST=gothub_db
+      - DB_HOST=${DB_HOST}
       - DB_USER=${DB_USER}
       - DB_PASS=${DB_PASS}
       - DB_NAME=${DB_NAME}
       - DB_PORT=${DB_PORT}
+
+      # AI Configuration
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
     volumes:
       - ./session:/app/session
       - .env:/app/.env
