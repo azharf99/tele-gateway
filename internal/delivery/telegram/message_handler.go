@@ -71,6 +71,7 @@ func (h *AuctionHandler) OnNewMessage(ctx context.Context, entities tg.Entities,
 
 	// Route to AI Gateway if it's a private message
 	if isPrivate && h.AIUseCase != nil {
+		h.Logger.Info("Private message detected, routing to AI Gateway", zap.Int64("user_id", groupID), zap.String("sender", senderName))
 		replyFunc := func(replyText string) error {
 			return h.UseCase.ReplyToUser(context.Background(), peer, msg.ID, replyText)
 		}
@@ -141,6 +142,7 @@ func (h *AuctionHandler) Handle(ctx context.Context, u tg.UpdatesClass) error {
 		if updates.Out {
 			return nil
 		}
+		h.Logger.Info("Private message detected (short)", zap.Int64("user_id", updates.UserID))
 		if h.AIUseCase != nil {
 			peer := &tg.InputPeerUser{
 				UserID: updates.UserID,

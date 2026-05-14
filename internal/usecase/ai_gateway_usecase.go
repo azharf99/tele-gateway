@@ -67,11 +67,11 @@ func (u *aiGatewayUseCase) HandlePrivateMessage(ctx context.Context, senderID in
 		q.timer.Stop()
 	}
 
-	q.timer = time.AfterFunc(1*time.Minute, func() {
+	q.timer = time.AfterFunc(10*time.Second, func() {
 		u.processQueue(senderID, q, replyFunc)
 	})
 
-	u.logger.Info("Message queued for AI", zap.Int64("sender_id", senderID), zap.String("sender_name", senderName))
+	u.logger.Info("Message queued for AI (10s debounce)", zap.Int64("sender_id", senderID), zap.String("sender_name", senderName))
 	return nil
 }
 
@@ -96,9 +96,9 @@ func (u *aiGatewayUseCase) processQueue(senderID int64, q *userQueue, replyFunc 
 	// Fix slice memory leak by allocating a new slice
 	q.messages = append([]string(nil), q.messages[limit:]...)
 
-	// If more than 10 messages remain, schedule another 1-minute timer (as per user request)
+	// If more than 10 messages remain, schedule another 10-second timer
 	if len(q.messages) > 0 {
-		q.timer = time.AfterFunc(1*time.Minute, func() {
+		q.timer = time.AfterFunc(10*time.Second, func() {
 			u.processQueue(senderID, q, replyFunc)
 		})
 	} else {
@@ -122,8 +122,8 @@ func (u *aiGatewayUseCase) processQueue(senderID int64, q *userQueue, replyFunc 
 	// Prepare content for Gemini
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// Using model gemini-2.5-flash
-	resp, err := u.genaiClient.Models.GenerateContent(ctx, "gemini-3.1-flash-lite", genai.Text(fmt.Sprintf("%s\n\nUser messages:\n%s", systemPrompt, combinedMessages)), nil)
+	// Using model gemini-1.5-flash
+	resp, err := u.genaiClient.Models.GenerateContent(ctx, "gemini-1.5-flash", genai.Text(fmt.Sprintf("%s\n\nUser messages:\n%s", systemPrompt, combinedMessages)), nil)
 	if err != nil {
 		u.logger.Error("Gemini API error", zap.Error(err))
 		return // Do not send error message to avoid leaking sensitive info
