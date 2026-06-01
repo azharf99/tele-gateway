@@ -67,11 +67,11 @@ func (u *aiGatewayUseCase) HandlePrivateMessage(ctx context.Context, senderID in
 		q.timer.Stop()
 	}
 
-	q.timer = time.AfterFunc(10*time.Second, func() {
+	q.timer = time.AfterFunc(60*time.Second, func() {
 		u.processQueue(senderID, q, replyFunc)
 	})
 
-	u.logger.Info("Message queued for AI (10s debounce)", zap.Int64("sender_id", senderID), zap.String("sender_name", senderName))
+	u.logger.Info("Message queued for AI (60s debounce)", zap.Int64("sender_id", senderID), zap.String("sender_name", senderName))
 	return nil
 }
 
@@ -122,8 +122,8 @@ func (u *aiGatewayUseCase) processQueue(senderID int64, q *userQueue, replyFunc 
 	// Prepare content for Gemini
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	// Using model gemini-3.1-flash-lite
-	resp, err := u.genaiClient.Models.GenerateContent(ctx, "gemini-3.1-flash-lite", genai.Text(fmt.Sprintf("%s\n\nUser messages:\n%s", systemPrompt, combinedMessages)), nil)
+	// Using model gemma-4-31b-it which is optimized for instruction tasks and has better performance for short conversations, ideal for Telegram interactions
+	resp, err := u.genaiClient.Models.GenerateContent(ctx, "gemma-4-31b-it", genai.Text(fmt.Sprintf("%s\n\nUser messages:\n%s", systemPrompt, combinedMessages)), nil)
 	if err != nil {
 		u.logger.Error("Gemini API error", zap.Error(err))
 		return // Do not send error message to avoid leaking sensitive info
