@@ -120,6 +120,10 @@ func (u *auctionUseCase) GetAllRules() ([]domain.BidRule, error) {
 	return u.Repo.FindAll()
 }
 
+func (u *auctionUseCase) ImportRules(rules []domain.BidRule) (int, int, error) {
+	return u.Repo.BulkUpsert(rules)
+}
+
 func (u *auctionUseCase) SubmitOTP(code string) error {
 	if u.status != "WAITING_OTP" {
 		return errors.New("not waiting for OTP")

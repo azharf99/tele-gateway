@@ -30,6 +30,7 @@ type BidRepository interface {
 	DeactivateRule(id uint) error
 	CheckStopKeyword(id uint, text string) (bool, error)
 	GetActiveRulesByGroup(groupID int64, topicID int) ([]BidRule, error)
+	BulkUpsert(rules []BidRule) (created int, updated int, err error) // Upsert by unique keyword (revives soft-deleted)
 }
 
 type AuctionUseCase interface {
@@ -43,6 +44,7 @@ type AuctionUseCase interface {
 	UpdateRule(rule *BidRule) error
 	DeleteRule(id uint) error
 	GetAllRules() ([]BidRule, error)
+	ImportRules(rules []BidRule) (created int, updated int, err error) // Bulk CSV import via upsert
 	SubmitOTP(code string) error
 	GetStatus() string // "WAITING_OTP", "RUNNING", "IDLE"
 	SetStatus(status string)

@@ -64,6 +64,56 @@ func (h *BidHandler) GetAllRules(c *gin.Context) {
 	c.JSON(http.StatusOK, rules)
 }
 
+// ImportRules bulk-seeds bid rules from an uploaded CSV file (multipart field
+// "file") using upsert-by-keyword: existing keywords are replaced, new ones are
+// created. Valid rows are committed atomically; invalid rows are skipped and
+// reported so a single bad line never blocks the whole import.
+func (h *BidHandler) ImportRules(c *gin.Context) {
+	// Cap the request body before touching multipart parsing to bound memory use.
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxImportBytes)
+
+	fileHeader, err := c.FormFile("file")
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "CSV file is required (multipart field 'file')"})
+		return
+	}
+
+	if fileHeader.Size > maxImportBytes {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "file too large (max 2 MiB)"})
+		return
+	}
+
+	f, err := fileHeader.Open()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "failed to open uploaded file"})
+		return
+	}
+	defer f.Close()
+
+	rules, rowErrors, err := parseBidRuleCSV(f)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var created, updated int
+	if len(rules) > 0 {
+		created, updated, err = h.auctionUseCase.ImportRules(rules)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to import rules: " + err.Error()})
+			return
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"created":     created,
+		"updated":     updated,
+		"skipped":     len(rowErrors),
+		"total_valid": len(rules),
+		"errors":      rowErrors,
+	})
+}
+
 func (h *BidHandler) DeleteRule(c *gin.Context) {
 	id, _ := strconv.Atoi(c.Param("id"))
 	if err := h.auctionUseCase.DeleteRule(uint(id)); err != nil {

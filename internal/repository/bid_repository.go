@@ -2,6 +2,7 @@
 package repository
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 
@@ -159,6 +160,60 @@ func (r *bidRepository) CheckStopKeyword(id uint, text string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// BulkUpsert inserts or replaces rules keyed by their unique Keyword, all inside a
+// single transaction. If a rule with the same keyword already exists (including a
+// soft-deleted one), every editable field is overwritten and the row is revived;
+// otherwise a new row is created. Returns the number of created and updated rows.
+//
+// A map is used for the update set (not a struct) so that boolean false / zero
+// values — e.g. is_active=false, has_bidded=false, topic_id=0 — are actually
+// written; GORM silently skips zero-valued struct fields on Updates.
+func (r *bidRepository) BulkUpsert(rules []domain.BidRule) (int, int, error) {
+	var created, updated int
+
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		for i := range rules {
+			rule := rules[i]
+
+			var existing domain.BidRule
+			lookupErr := tx.Unscoped().Where("keyword = ?", rule.Keyword).First(&existing).Error
+
+			switch {
+			case lookupErr == nil:
+				if err := tx.Unscoped().Model(&domain.BidRule{}).Where("id = ?", existing.ID).
+					Updates(map[string]any{
+						"target_group_id": rule.TargetGroupID,
+						"topic_id":        rule.TopicID,
+						"keyword":         rule.Keyword,
+						"bid_message":     rule.BidMessage,
+						"stop_keywords":   rule.StopKeywords,
+						"is_active":       rule.IsActive,
+						"has_bidded":      rule.HasBidded,
+						"deleted_at":      nil, // revive if it was soft-deleted
+					}).Error; err != nil {
+					return err
+				}
+				updated++
+
+			case errors.Is(lookupErr, gorm.ErrRecordNotFound):
+				if err := tx.Create(&rule).Error; err != nil {
+					return err
+				}
+				created++
+
+			default:
+				return lookupErr
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, 0, err
+	}
+
+	return created, updated, nil
 }
 
 func (r *bidRepository) GetActiveRulesByGroup(groupID int64, topicID int) ([]domain.BidRule, error) {
