@@ -91,9 +91,13 @@ func (h *AuctionHandler) OnNewMessage(ctx context.Context, entities tg.Entities,
 		return nil
 	}
 
-	h.Logger.Debug("Incoming group/channel message",
+	// DIAGNOSTIC: promoted to Info so the bidding path is visible under zap.NewProduction().
+	// Compare group_id/topic_id here against the target_group_id/topic_id in your bid_rules row.
+	h.Logger.Info("Incoming group/channel message",
 		zap.Int64("group_id", groupID),
 		zap.Int("topic_id", topicID),
+		zap.Int("msg_id", msg.ID),
+		zap.String("text", text),
 	)
 
 	// Existing Bidding Logic
@@ -117,6 +121,23 @@ func (h *AuctionHandler) OnNewMessage(ctx context.Context, entities tg.Entities,
 		}(rule, peer, msg.ID)
 
 		return nil
+	}
+
+	// DIAGNOSTIC: explain why no bid was scheduled instead of silently returning.
+	switch {
+	case err != nil:
+		h.Logger.Info("No matching bid rule for message",
+			zap.Int64("group_id", groupID),
+			zap.Int("topic_id", topicID),
+			zap.Error(err))
+	case rule != nil && rule.HasBidded:
+		h.Logger.Info("Matching rule found but already bidded (has_bidded=true)",
+			zap.Uint("rule_id", rule.ID),
+			zap.String("keyword", rule.Keyword))
+	default:
+		h.Logger.Info("No bid scheduled (no active rule matched)",
+			zap.Int64("group_id", groupID),
+			zap.Int("topic_id", topicID))
 	}
 	return nil
 }
