@@ -49,7 +49,7 @@ func main() {
 	}
 	handlerTg.AIUseCase = aiUC
 
-	tgClient, err := telegram.NewTelegramClient(cfg.AppID, cfg.AppHash, cfg.SessionFile, handlerTg)
+	tgClient, err := telegram.NewTelegramClient(cfg.AppID, cfg.AppHash, cfg.SessionFile, handlerTg, logger)
 	if err != nil {
 		logger.Fatal("failed to init telegram client", zap.Error(err))
 	}

@@ -74,6 +74,18 @@ func (r *bidRepository) Delete(id uint) error {
 	return r.db.Unscoped().Delete(&domain.BidRule{}, id).Error
 }
 
+// DeleteMany removes every rule whose ID is in ids and reports how many rows were
+// actually deleted, which can be lower than len(ids) if some were already gone.
+// Like Delete this is a hard delete, so the unique keyword index is freed up
+// immediately and the same keyword can be re-imported afterwards.
+func (r *bidRepository) DeleteMany(ids []uint) (int64, error) {
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	res := r.db.Unscoped().Where("id IN ?", ids).Delete(&domain.BidRule{})
+	return res.RowsAffected, res.Error
+}
+
 func (r *bidRepository) FindByID(id uint) (*domain.BidRule, error) {
 	var rule domain.BidRule
 	err := r.db.First(&rule, id).Error
@@ -128,8 +140,28 @@ func (r *bidRepository) GetActiveRuleByKeyword(keyword string, groupID int64, to
 	return nil, gorm.ErrRecordNotFound
 }
 
-func (r *bidRepository) MarkAsBidded(id uint) error {
-	return r.db.Model(&domain.BidRule{}).Where("id = ?", id).Update("has_bidded", true).Error
+// ClaimForBid marks a rule as bidded, but only if it is still active and has not
+// been bidded yet, and reports whether this caller is the one that won the claim.
+//
+// The condition lives in the UPDATE itself so the check and the write are a
+// single atomic statement. Two goroutines racing on the same rule — duplicate
+// deliveries of one auction post, or two posts arriving within the bid delay —
+// therefore produce exactly one winner and one bid, instead of both reading
+// has_bidded=false and both sending.
+func (r *bidRepository) ClaimForBid(id uint) (bool, error) {
+	res := r.db.Model(&domain.BidRule{}).
+		Where("id = ? AND has_bidded = ? AND is_active = ?", id, false, true).
+		Update("has_bidded", true)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected == 1, nil
+}
+
+// ReleaseBid undoes a claim taken by ClaimForBid. Used when the bid could not be
+// delivered, so a later matching message still gets a chance to bid.
+func (r *bidRepository) ReleaseBid(id uint) error {
+	return r.db.Model(&domain.BidRule{}).Where("id = ?", id).Update("has_bidded", false).Error
 }
 
 func (r *bidRepository) DeactivateRule(id uint) error {

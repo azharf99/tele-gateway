@@ -55,6 +55,8 @@ func InitRouter(authHandler *AuthHandler, bidHandler *BidHandler, aiHandler *AIH
 		protected.POST("/rules/import", RoleMiddleware(domain.RoleAdmin), bidHandler.ImportRules)
 		protected.PUT("/rules/:id", RoleMiddleware(domain.RoleAdmin), bidHandler.UpdateRule)
 		protected.DELETE("/rules/:id", RoleMiddleware(domain.RoleAdmin), bidHandler.DeleteRule)
+		// POST rather than DELETE-with-body: proxies and some clients drop bodies on DELETE.
+		protected.POST("/rules/bulk-delete", RoleMiddleware(domain.RoleAdmin), bidHandler.BulkDeleteRules)
 
 		// Bot Management
 		protected.GET("/bot/status", bidHandler.GetStatus)

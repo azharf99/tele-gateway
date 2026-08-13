@@ -27,7 +27,7 @@ There is no linter config committed; use `go vet ./...` and `gofmt`.
 
 ## Runtime prerequisites
 
-- **PostgreSQL** — connection built from `DB_*` env vars in [db.go](internal/repository/db.go); schema is created via GORM `AutoMigrate` on startup (no migration files). TimeZone is hardcoded to `Asia/Jakarta`, `sslmode=disable`.
+- **PostgreSQL** — connection built from `DB_*` env vars in [db.go](internal/repository/db.go); schema is created via GORM `AutoMigrate` on startup (no migration files). Connect + ping is retried (15 attempts, 2s apart) because the shared Postgres from the other compose stack routinely isn't up — or isn't resolvable in DNS — when this container boots. TimeZone is hardcoded to `Asia/Jakarta`, `sslmode=disable`.
 - **`.env`** — copy `.env.example`. Requires Telegram `TELEGRAM_APP_ID`/`TELEGRAM_APP_HASH` (from my.telegram.org), `PHONE_NUMBER`, optional 2FA `PASSWORD`, `JWT_SECRET`/`JWT_REFRESH_SECRET`, `GEMINI_API_KEY`, `ADMIN_EMAIL`/`ADMIN_PASSWORD`/`ADMIN_NAME` (seeds the first admin user), and `ALLOWED_ORIGINS` (comma-separated CORS list).
 - **OTP on first login**: the userbot needs a Telegram login code. `main.go` wires an `otpProvider` that blocks on `WaitOTP` (5-min timeout) — submit the code via `POST /api/bot/otp`, or fall back to console stdin (`docker attach` in production). Session is persisted to `TELEGRAM_SESSION_FILE` so this only happens once.
 
@@ -56,7 +56,11 @@ The `auctionUseCase` is shared between both and holds bot **status** (`IDLE` →
 
 ### Telegram update handling ([message_handler.go](internal/delivery/telegram/message_handler.go))
 
-`AuctionHandler.Handle` is the gotd `UpdateHandler`. gotd delivers updates in **several shapes** that must each be unpacked separately — `*tg.Updates`, `*tg.UpdatesCombined`, `*tg.UpdateShort`, and `*tg.UpdateShortMessage`. Only the first two carry `entities` (users/channels with `AccessHash`); `UpdateShort*` variants arrive without them, so peer resolution falls back to `AccessHash: 0` and hopes the sender library resolves it. When adding update handling, remember to cover all these cases.
+`AuctionHandler.Handle` is the gotd `UpdateHandler`. gotd delivers updates in **several shapes** that must each be unpacked separately — `*tg.Updates`, `*tg.UpdatesCombined`, `*tg.UpdateShort`, and `*tg.UpdateShortMessage`. Only the first two carry `entities` (users/channels with `AccessHash`); `UpdateShort*` variants arrive without them. When adding update handling, remember to cover all these cases.
+
+**Channel access hashes are not trustworthy.** An `entities.Channels[id]` entry can be a *min* constructor (`channel.Min == true`), whose `AccessHash` is only valid for reading the update it arrived with. Sending to it fails with `CHANNEL_INVALID` even though the account keeps receiving messages from that channel — this silently swallowed every bid in one forum group for weeks. The handler therefore passes `AccessHash: 0` for min (or missing) channels, and [client.go](internal/delivery/telegram/client.go) resolves a real hash from `messages.getDialogs` (always full constructors), caching it per channel. `Reply` also retries once on `CHANNEL_INVALID`/`PEER_ID_INVALID`/`CHANNEL_PRIVATE` after dropping the cached hash, so a rotated hash self-heals.
+
+**Updates are de-duplicated.** Telegram re-delivers the same message in more than one envelope, which previously produced two bids for one auction post. `alreadyHandled(peerID, msgID)` keeps a 5-minute TTL set of seen messages and drops repeats before any work happens.
 
 `OnNewMessage` routes by peer type:
 - **Private message (`PeerUser`)** → AI gateway (`AIUseCase.HandlePrivateMessage`), run in a background goroutine so the update loop never blocks.
@@ -68,7 +72,7 @@ This is the core auction logic and the most subtle part of the codebase:
 - A rule's `Keyword` is a **comma-separated list of patterns, ALL of which must match** (logical AND) for the rule to fire.
 - Each pattern is compiled as a **case-insensitive Go regex** (`(?i)` prefix); if compilation fails it falls back to case-insensitive substring `Contains`.
 - **Topic scoping**: `topic_id = 0` means the rule is global for the group; a message in topic N matches rules with `topic_id = N OR topic_id = 0`. Topic-specific rules are ordered first (`topic_id desc`).
-- `HasBidded` guards against double-bidding; `ExecuteBid` **re-fetches the rule** right before sending to avoid racing the delay window against a concurrent deactivation.
+- `HasBidded` guards against double-bidding; `ExecuteBid` **re-fetches the rule** right before sending to avoid racing the delay window against a concurrent deactivation, then **claims** it via `ClaimForBid` — a single conditional `UPDATE ... WHERE has_bidded = false AND is_active = true` whose `RowsAffected` decides the winner. Claim happens *before* the send so concurrent goroutines can't both pass the check; `ReleaseBid` gives the rule back if the send fails.
 - Go's `regexp` is RE2 — **no backreferences or lookaround**. The example schedule regex `^(Jadwal\s*:\s*)?(Senin|Monday|Mon)\s+(pukul\s+)?19([.:]00)?\s*(WIB)?$` works because it's pure RE2.
 - **Multi-line matching**: the shared `matchPattern` helper tests each pattern against the **full message text AND every individual line** (split on `\n`, trimmed). This lets an anchored `^...$` pattern match a schedule row embedded in a multi-line auction post (`Course:… / Jadwal: Senin 19.00 WIB / Req:…`) while still rejecting a row like `Jadwal: Senin 19.00WIB dan Sabtu 18.00WIB` where trailing text breaks the `$` anchor. Both keyword detection and stop-keyword detection go through `matchPattern`. Behavior is locked by [bid_repository_test.go](internal/repository/bid_repository_test.go) — a pure-function test needing no DB.
 - `Create` recovers soft-deleted rows: because `Keyword` has a unique index, re-creating a previously deleted keyword un-deletes and overwrites the old row rather than erroring.
@@ -81,7 +85,9 @@ Gemini specifics: uses `google.golang.org/genai` with `BackendGeminiAPI`, model 
 
 ### HTTP API ([router.go](internal/delivery/http/router.go))
 
-All routes under `/api`. Public: `POST /login`, `POST /refresh`. Everything else is behind `AuthMiddleware` (JWT Bearer, HS256, `JWT_SECRET`). Access tokens live 15 min, refresh tokens 7 days (`JWT_REFRESH_SECRET`). Mutating rule/user/bot/AI-context routes additionally require `RoleMiddleware(RoleAdmin)`.
+All routes under `/api`. Public: `POST /login`, `POST /refresh`.
+
+Bulk rule operations: `POST /rules/import` (CSV upsert by keyword) and `POST /rules/bulk-delete` (`{"ids":[…]}`, hard delete, max 1000 per request). Bulk delete is a POST, not `DELETE` with a body, because proxies and some HTTP clients drop bodies on DELETE. Its response separates `deleted` from `requested` — IDs that were already gone are not an error. Invalid selections come back as 400 via the `domain.ErrInvalidRuleSelection` sentinel (matched with `errors.Is`, never string comparison); anything else is 500. Everything else is behind `AuthMiddleware` (JWT Bearer, HS256, `JWT_SECRET`). Access tokens live 15 min, refresh tokens 7 days (`JWT_REFRESH_SECRET`). Mutating rule/user/bot/AI-context routes additionally require `RoleMiddleware(RoleAdmin)`.
 
 Roles are string constants: `RoleAdmin = "Admin"`, `RoleUser = "Siswa"` (the app's domain is a tutoring/course context). New users default to `Siswa`.
 

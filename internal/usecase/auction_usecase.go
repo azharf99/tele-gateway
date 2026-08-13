@@ -4,6 +4,7 @@ package usecase
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/azharf99/tele-gateway/internal/domain"
@@ -53,13 +54,30 @@ func (u *auctionUseCase) ExecuteBid(ctx context.Context, peer tg.InputPeerClass,
 		return nil
 	}
 
-	u.Logger.Info("Sending bid message...", zap.String("keyword", latestRule.Keyword), zap.String("bid_message", latestRule.BidMessage), zap.Int("msg_id", msgID))
-	err = u.TgClient.Reply(ctx, peer, msgID, latestRule.BidMessage)
+	// Claim the rule before sending, not after. ClaimForBid flips has_bidded in a
+	// single conditional UPDATE, so if the same auction post is delivered twice
+	// only one of the racing goroutines gets through to Reply.
+	claimed, err := u.Repo.ClaimForBid(latestRule.ID)
 	if err != nil {
 		return err
 	}
+	if !claimed {
+		u.Logger.Info("Bid skipped, rule already claimed by a concurrent update", zap.Uint("rule_id", latestRule.ID))
+		return nil
+	}
 
-	return u.Repo.MarkAsBidded(latestRule.ID)
+	u.Logger.Info("Sending bid message...", zap.String("keyword", latestRule.Keyword), zap.String("bid_message", latestRule.BidMessage), zap.Int("msg_id", msgID))
+	if err := u.TgClient.Reply(ctx, peer, msgID, latestRule.BidMessage); err != nil {
+		// The bid never landed, so give the rule back instead of leaving it
+		// permanently marked as bidded.
+		if releaseErr := u.Repo.ReleaseBid(latestRule.ID); releaseErr != nil {
+			u.Logger.Error("Failed to release bid claim after send error",
+				zap.Uint("rule_id", latestRule.ID), zap.Error(releaseErr))
+		}
+		return err
+	}
+
+	return nil
 }
 
 func (u *auctionUseCase) CheckAndStopByText(ctx context.Context, text string, groupID int64, topicID int) error {
@@ -114,6 +132,44 @@ func (u *auctionUseCase) UpdateRule(rule *domain.BidRule) error {
 
 func (u *auctionUseCase) DeleteRule(id uint) error {
 	return u.Repo.Delete(id)
+}
+
+// maxBulkDeleteIDs caps a single bulk delete, mirroring the CSV import cap, so one
+// request can never turn into an unbounded IN (...) statement.
+const maxBulkDeleteIDs = 1000
+
+// DeleteRules removes several rules in one go and returns how many rows were
+// actually deleted. IDs are de-duplicated and zero values dropped first, so a
+// sloppy selection from the UI cannot inflate the statement or the reported count.
+func (u *auctionUseCase) DeleteRules(ids []uint) (int64, error) {
+	unique := make([]uint, 0, len(ids))
+	seen := make(map[uint]struct{}, len(ids))
+	for _, id := range ids {
+		if id == 0 {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		unique = append(unique, id)
+	}
+
+	switch {
+	case len(unique) == 0:
+		return 0, fmt.Errorf("%w: no rule ids given", domain.ErrInvalidRuleSelection)
+	case len(unique) > maxBulkDeleteIDs:
+		return 0, fmt.Errorf("%w: %d ids given, max %d per request",
+			domain.ErrInvalidRuleSelection, len(unique), maxBulkDeleteIDs)
+	}
+
+	deleted, err := u.Repo.DeleteMany(unique)
+	if err != nil {
+		return 0, err
+	}
+
+	u.Logger.Info("Bulk deleted bid rules", zap.Int("requested", len(unique)), zap.Int64("deleted", deleted))
+	return deleted, nil
 }
 
 func (u *auctionUseCase) GetAllRules() ([]domain.BidRule, error) {

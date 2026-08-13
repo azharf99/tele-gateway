@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"math/rand"
+	"sync"
 	"time"
 
 	"github.com/azharf99/tele-gateway/internal/domain"
@@ -12,10 +13,62 @@ import (
 	"go.uber.org/zap"
 )
 
+// seenMessageTTL is how long a (peer, message) pair is remembered for
+// de-duplication. Comfortably longer than the 2–5s bid delay, short enough that
+// the map stays small.
+const seenMessageTTL = 5 * time.Minute
+
 type AuctionHandler struct {
 	UseCase   domain.AuctionUseCase
 	AIUseCase domain.AIGatewayUseCase
 	Logger    *zap.Logger
+
+	// BidDelay returns how long to wait before sending a bid. Defaults to a
+	// random 2–5s (human simulation, anti-ban); tests override it.
+	BidDelay func() time.Duration
+
+	seenMu   sync.Mutex
+	seenMsgs map[string]time.Time
+}
+
+func (h *AuctionHandler) bidDelay() time.Duration {
+	if h.BidDelay != nil {
+		return h.BidDelay()
+	}
+	return time.Duration(rand.Intn(3000)+2000) * time.Millisecond
+}
+
+// alreadyHandled reports whether this exact (peer, message) pair has been
+// processed recently, and records it otherwise.
+//
+// Telegram delivers the same message more than once — the production logs show
+// a single auction post producing two "Keyword detected" lines 150ms apart for
+// the same msg_id, because it arrived both inside *tg.Updates and again in
+// another envelope. Without this guard that posts the bid twice, which is
+// exactly the kind of behaviour that gets a userbot banned.
+func (h *AuctionHandler) alreadyHandled(peerID int64, msgID int) bool {
+	key := fmt.Sprintf("%d:%d", peerID, msgID)
+	now := time.Now()
+
+	h.seenMu.Lock()
+	defer h.seenMu.Unlock()
+
+	if h.seenMsgs == nil {
+		h.seenMsgs = make(map[string]time.Time)
+	}
+
+	if seenAt, ok := h.seenMsgs[key]; ok && now.Sub(seenAt) < seenMessageTTL {
+		return true
+	}
+
+	for k, at := range h.seenMsgs {
+		if now.Sub(at) >= seenMessageTTL {
+			delete(h.seenMsgs, k)
+		}
+	}
+
+	h.seenMsgs[key] = now
+	return false
 }
 
 func (h *AuctionHandler) OnNewMessage(ctx context.Context, entities tg.Entities, msg *tg.Message) error {
@@ -59,19 +112,37 @@ func (h *AuctionHandler) OnNewMessage(ctx context.Context, entities tg.Entities,
 		}
 	case *tg.PeerChannel:
 		groupID = p.ChannelID
-		channel, ok := entities.Channels[p.ChannelID]
-		if !ok {
-			h.Logger.Error("Channel not found in entities", zap.Int64("channel_id", p.ChannelID))
-			return nil
+
+		// Only a full channel constructor carries an access hash that Telegram
+		// accepts on outgoing calls. A "min" one is valid just for reading the
+		// update it came with, and sending to it fails with CHANNEL_INVALID —
+		// which is exactly how bids in forum groups were being lost. Leave the
+		// hash at 0 in that case and let the client resolve a real one.
+		var accessHash int64
+		switch channel, ok := entities.Channels[p.ChannelID]; {
+		case ok && !channel.Min:
+			accessHash = channel.AccessHash
+		case ok:
+			h.Logger.Info("Channel entity is min, access hash will be resolved before sending",
+				zap.Int64("channel_id", p.ChannelID))
+		default:
+			h.Logger.Info("Channel not found in entities, access hash will be resolved before sending",
+				zap.Int64("channel_id", p.ChannelID))
 		}
+
 		peer = &tg.InputPeerChannel{
-			ChannelID:  channel.ID,
-			AccessHash: channel.AccessHash,
+			ChannelID:  p.ChannelID,
+			AccessHash: accessHash,
 		}
 	}
 
 	if peer == nil {
 		h.Logger.Error("Failed to resolve input peer")
+		return nil
+	}
+
+	if h.alreadyHandled(groupID, msg.ID) {
+		h.Logger.Info("Duplicate update ignored", zap.Int64("group_id", groupID), zap.Int("msg_id", msg.ID))
 		return nil
 	}
 
@@ -111,8 +182,7 @@ func (h *AuctionHandler) OnNewMessage(ctx context.Context, entities tg.Entities,
 		h.Logger.Info("Keyword detected, scheduling bid...", zap.String("keyword", rule.Keyword), zap.Int("topic_id", topicID), zap.Int("msg_id", msg.ID))
 
 		go func(r *domain.BidRule, p tg.InputPeerClass, mID int) {
-			delay := time.Duration(rand.Intn(3000)+2000) * time.Millisecond
-			time.Sleep(delay)
+			time.Sleep(h.bidDelay())
 
 			err := h.UseCase.ExecuteBid(context.Background(), p, mID, r)
 			if err != nil {
@@ -167,6 +237,9 @@ func (h *AuctionHandler) Handle(ctx context.Context, u tg.UpdatesClass) error {
 	switch updates := u.(type) {
 	case *tg.UpdateShortMessage:
 		if updates.Out {
+			return nil
+		}
+		if h.alreadyHandled(updates.UserID, updates.ID) {
 			return nil
 		}
 		h.Logger.Info("Private message detected (short)", zap.Int64("user_id", updates.UserID))

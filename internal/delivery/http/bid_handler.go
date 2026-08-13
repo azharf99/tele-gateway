@@ -2,6 +2,7 @@
 package http
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 
@@ -121,6 +122,37 @@ func (h *BidHandler) DeleteRule(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "Rule deleted"})
+}
+
+// BulkDeleteRules removes many rules in a single request. A CSV import can seed
+// hundreds of rules at once, and clearing them one DELETE at a time from the UI
+// is both slow and easy to get wrong halfway through.
+//
+// The response reports `deleted` separately from `requested`: IDs that were
+// already gone are not an error, they simply don't count towards `deleted`.
+func (h *BidHandler) BulkDeleteRules(c *gin.Context) {
+	var req struct {
+		IDs []uint `json:"ids" binding:"required,min=1"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "field 'ids' must be a non-empty array of rule ids"})
+		return
+	}
+
+	deleted, err := h.auctionUseCase.DeleteRules(req.IDs)
+	if err != nil {
+		if errors.Is(err, domain.ErrInvalidRuleSelection) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"deleted":   deleted,
+		"requested": len(req.IDs),
+	})
 }
 
 func (h *BidHandler) SubmitOTP(c *gin.Context) {
