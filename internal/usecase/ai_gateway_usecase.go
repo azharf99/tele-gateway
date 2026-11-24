@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/azharf99/tele-gateway/internal/domain"
+	"github.com/azharf99/tele-gateway/internal/parser"
 	"go.uber.org/zap"
 	"google.golang.org/genai"
 )
@@ -120,8 +121,10 @@ func (u *aiGatewayUseCase) processQueue(queueKey string, senderID int64, promptO
 	if systemPrompt == "" {
 		systemPrompt = "You are a helpful assistant."
 		aiCtx, err := u.repo.Get("system_prompt")
+		nowWIB := time.Now().In(parser.WIBLocation()).Format("Monday, 02 Jan 2006 15:04 WIB")
+
 		if err == nil && aiCtx != nil && strings.TrimSpace(aiCtx.Value) != "" {
-			systemPrompt = aiCtx.Value
+			systemPrompt = fmt.Sprintf(`%s\n\nWaktu Saat ini (WIB): %s`, aiCtx.Value, nowWIB)
 		}
 	}
 
@@ -133,8 +136,10 @@ func (u *aiGatewayUseCase) processQueue(queueKey string, senderID int64, promptO
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	temperature := float32(0.4)
 	config := &genai.GenerateContentConfig{
 		SystemInstruction: genai.NewContentFromText(systemPrompt, ""),
+		Temperature:       &temperature,
 	}
 
 	resp, err := u.genaiClient.Models.GenerateContent(ctx, "gemini-3.1-flash-lite", genai.Text(combinedMessages), config)
@@ -157,7 +162,7 @@ func (u *aiGatewayUseCase) processQueue(queueKey string, senderID int64, promptO
 		return // Do not send empty response fallback
 	}
 
-	aiResponse = fmt.Sprintf("%s\n\n[Dibalas oleh Azhar's AI Assistant]", strings.TrimSpace(aiResponse))
+	aiResponse = fmt.Sprintf("%s\n\n[Azhar's AI Assistant]", strings.TrimSpace(aiResponse))
 
 	err = replyFunc(aiResponse)
 	if err != nil {
