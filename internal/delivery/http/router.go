@@ -11,7 +11,15 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func InitRouter(authHandler *AuthHandler, bidHandler *BidHandler, aiHandler *AIHandler, userHandler *UserHandler, messageHandler *MessageHandler, b2bAPIKeys []string) *gin.Engine {
+func InitRouter(
+	authHandler *AuthHandler,
+	accountHandler *AccountHandler,
+	auctionHandler *ClassAuctionHandler,
+	aiHandler *AIHandler,
+	userHandler *UserHandler,
+	messageHandler *MessageHandler,
+	b2bAPIKeys []string,
+) *gin.Engine {
 	r := gin.Default()
 
 	r.SetTrustedProxies(nil)
@@ -27,7 +35,7 @@ func InitRouter(authHandler *AuthHandler, bidHandler *BidHandler, aiHandler *AIH
 
 	// CORS Setup
 	r.Use(cors.New(cors.Config{
-		AllowOrigins:     allowedOrigins, // For production, specify your frontend URL
+		AllowOrigins:     allowedOrigins,
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
 		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-API-Key"},
 		ExposeHeaders:    []string{"Content-Length"},
@@ -35,10 +43,9 @@ func InitRouter(authHandler *AuthHandler, bidHandler *BidHandler, aiHandler *AIH
 		MaxAge:           12 * time.Hour,
 	}))
 
-	// Buat grup utama "/api" untuk semua request dari frontend
 	api := r.Group("/api")
 
-	// Public Routes (Tanpa Middleware Auth)
+	// Public Routes
 	api.POST("/login", authHandler.Login)
 	api.POST("/refresh", authHandler.RefreshToken)
 
@@ -58,25 +65,53 @@ func InitRouter(authHandler *AuthHandler, bidHandler *BidHandler, aiHandler *AIH
 		// Profile Management
 		protected.PUT("/profile", authHandler.UpdateProfile)
 
-		// Bid Rules Management
-		protected.GET("/rules", bidHandler.GetAllRules)
-		protected.POST("/rules", RoleMiddleware(domain.RoleAdmin), bidHandler.CreateRule)
-		protected.POST("/rules/import", RoleMiddleware(domain.RoleAdmin), bidHandler.ImportRules)
-		protected.PUT("/rules/:id", RoleMiddleware(domain.RoleAdmin), bidHandler.UpdateRule)
-		protected.DELETE("/rules/:id", RoleMiddleware(domain.RoleAdmin), bidHandler.DeleteRule)
-		// POST rather than DELETE-with-body: proxies and some clients drop bodies on DELETE.
-		protected.POST("/rules/bulk-delete", RoleMiddleware(domain.RoleAdmin), bidHandler.BulkDeleteRules)
+		// Class Auction Catalog & Global Stats
+		protected.GET("/auction/catalog", auctionHandler.GetCatalog)
+		protected.GET("/auction/stats", auctionHandler.GetStats)
 
-		// Bot Management
-		protected.GET("/bot/status", bidHandler.GetStatus)
-		protected.POST("/bot/otp", RoleMiddleware(domain.RoleAdmin), bidHandler.SubmitOTP)
+		// Multi-Account Telegram Management
+		accounts := protected.Group("/accounts")
+		{
+			accounts.GET("", accountHandler.ListAccounts)
+			accounts.POST("", RoleMiddleware(domain.RoleAdmin), accountHandler.CreateAccount)
+			accounts.PUT("/:id", RoleMiddleware(domain.RoleAdmin), accountHandler.UpdateAccount)
+			accounts.DELETE("/:id", RoleMiddleware(domain.RoleAdmin), accountHandler.DeleteAccount)
+			accounts.POST("/:id/start", RoleMiddleware(domain.RoleAdmin), accountHandler.StartAccount)
+			accounts.POST("/:id/stop", RoleMiddleware(domain.RoleAdmin), accountHandler.StopAccount)
+			accounts.POST("/:id/otp", RoleMiddleware(domain.RoleAdmin), accountHandler.SubmitOTP)
+			accounts.POST("/:id/2fa", RoleMiddleware(domain.RoleAdmin), accountHandler.Submit2FA)
 
-		// Groups Management
-		protected.GET("/groups", bidHandler.GetGroups)
-		protected.GET("/groups/:id/topics", bidHandler.GetGroupTopics)
-		protected.POST("/groups/sync", RoleMiddleware(domain.RoleAdmin), bidHandler.SyncGroups)
+			// Per-Account Groups & Forum Topics
+			accounts.GET("/:id/groups", accountHandler.GetGroups)
+			accounts.POST("/:id/groups/sync", RoleMiddleware(domain.RoleAdmin), accountHandler.SyncGroups)
+			accounts.GET("/:id/groups/:groupId/topics", accountHandler.GetGroupTopics)
 
-		// AI Context Management
+			// Per-Account Class Auction Management
+			auction := accounts.Group("/:id/auction")
+			{
+				auction.GET("/profile", auctionHandler.GetProfile)
+				auction.PUT("/profile", RoleMiddleware(domain.RoleAdmin), auctionHandler.UpdateProfile)
+
+				auction.GET("/targets", auctionHandler.ListTargets)
+				auction.POST("/targets", RoleMiddleware(domain.RoleAdmin), auctionHandler.AddTarget)
+				auction.PUT("/targets/:targetId", RoleMiddleware(domain.RoleAdmin), auctionHandler.UpdateTarget)
+				auction.DELETE("/targets/:targetId", RoleMiddleware(domain.RoleAdmin), auctionHandler.DeleteTarget)
+
+				auction.GET("/schedule", auctionHandler.GetWeeklySchedule)
+				auction.PUT("/schedule", RoleMiddleware(domain.RoleAdmin), auctionHandler.ReplaceWeeklySchedule)
+
+				auction.GET("/overrides", auctionHandler.ListDateOverrides)
+				auction.POST("/overrides", RoleMiddleware(domain.RoleAdmin), auctionHandler.AddDateOverride)
+				auction.DELETE("/overrides/:overrideId", RoleMiddleware(domain.RoleAdmin), auctionHandler.DeleteDateOverride)
+
+				auction.POST("/simulate", auctionHandler.Simulate)
+				auction.GET("/logs", auctionHandler.ListLogs)
+				auction.POST("/logs/:logId/outcome", RoleMiddleware(domain.RoleAdmin), auctionHandler.MarkLogOutcome)
+				auction.GET("/stats", auctionHandler.GetStats)
+			}
+		}
+
+		// Global AI Context Management (fallback default prompt)
 		protected.POST("/ai/context", RoleMiddleware(domain.RoleAdmin), aiHandler.SetContext)
 		protected.GET("/ai/context", aiHandler.GetContext)
 

@@ -46,12 +46,13 @@ func NewAIGatewayUseCase(repo domain.AIContextRepository, apiKey string, logger 
 	}, nil
 }
 
-func (u *aiGatewayUseCase) HandlePrivateMessage(ctx context.Context, senderID int64, senderName string, text string, replyFunc func(string) error) error {
-	qRaw, ok := u.queues.Load(senderID)
+func (u *aiGatewayUseCase) HandlePrivateMessage(ctx context.Context, accountID uint, senderID int64, senderName string, promptOverride string, text string, replyFunc func(string) error) error {
+	queueKey := fmt.Sprintf("%d:%d", accountID, senderID)
+	qRaw, ok := u.queues.Load(queueKey)
 	var q *userQueue
 	if !ok {
 		q = &userQueue{}
-		qRaw, _ = u.queues.LoadOrStore(senderID, q)
+		qRaw, _ = u.queues.LoadOrStore(queueKey, q)
 		q = qRaw.(*userQueue)
 	} else {
 		q = qRaw.(*userQueue)
@@ -68,18 +69,22 @@ func (u *aiGatewayUseCase) HandlePrivateMessage(ctx context.Context, senderID in
 	}
 
 	q.timer = time.AfterFunc(60*time.Second, func() {
-		u.processQueue(senderID, q, replyFunc)
+		u.processQueue(queueKey, senderID, promptOverride, q, replyFunc)
 	})
 
-	u.logger.Info("Message queued for AI (60s debounce)", zap.Int64("sender_id", senderID), zap.String("sender_name", senderName))
+	u.logger.Info("Message queued for AI (60s debounce)",
+		zap.Uint("account_id", accountID),
+		zap.Int64("sender_id", senderID),
+		zap.String("sender_name", senderName),
+	)
 	return nil
 }
 
-func (u *aiGatewayUseCase) processQueue(senderID int64, q *userQueue, replyFunc func(string) error) {
+func (u *aiGatewayUseCase) processQueue(queueKey string, senderID int64, promptOverride string, q *userQueue, replyFunc func(string) error) {
 	q.mu.Lock()
 	if len(q.messages) == 0 {
 		q.timer = nil
-		u.queues.CompareAndDelete(senderID, q)
+		u.queues.CompareAndDelete(queueKey, q)
 		q.mu.Unlock()
 		return
 	}
@@ -99,22 +104,25 @@ func (u *aiGatewayUseCase) processQueue(senderID int64, q *userQueue, replyFunc 
 	// If more than 10 messages remain, schedule another 10-second timer
 	if len(q.messages) > 0 {
 		q.timer = time.AfterFunc(10*time.Second, func() {
-			u.processQueue(senderID, q, replyFunc)
+			u.processQueue(queueKey, senderID, promptOverride, q, replyFunc)
 		})
 	} else {
 		q.timer = nil
-		u.queues.CompareAndDelete(senderID, q)
+		u.queues.CompareAndDelete(queueKey, q)
 	}
 	q.mu.Unlock()
 
 	// Process the batch with AI
-	u.logger.Info("Processing AI batch", zap.Int64("sender_id", senderID), zap.Int("batch_size", len(batch)))
+	u.logger.Info("Processing AI batch", zap.String("queue_key", queueKey), zap.Int64("sender_id", senderID), zap.Int("batch_size", len(batch)))
 
-	// Get System Prompt from DB
-	systemPrompt := "You are a helpful assistant."
-	aiCtx, err := u.repo.Get("system_prompt")
-	if err == nil && aiCtx != nil {
-		systemPrompt = aiCtx.Value
+	// Get System Prompt (account override first, then global DB fallback)
+	systemPrompt := strings.TrimSpace(promptOverride)
+	if systemPrompt == "" {
+		systemPrompt = "You are a helpful assistant."
+		aiCtx, err := u.repo.Get("system_prompt")
+		if err == nil && aiCtx != nil && strings.TrimSpace(aiCtx.Value) != "" {
+			systemPrompt = aiCtx.Value
+		}
 	}
 
 	combinedMessages := strings.Join(batch, "\n")

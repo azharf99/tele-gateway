@@ -4,6 +4,7 @@ package config
 import (
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,10 @@ type Config struct {
 	AppID                 int
 	AppHash               string
 	SessionFile           string
+	SessionDir            string
+	PhoneNumber           string
+	Password              string
+	EncryptionKey         string
 	DBHost                string
 	DBUser                string
 	DBPass                string
@@ -33,6 +38,7 @@ type Config struct {
 	WatchdogInterval      time.Duration
 	WatchdogFailThreshold int
 	WatchdogServiceName   string
+	WatchdogAccountID     uint
 	WatchdogAlertChatID   int64
 	WatchdogAlertTopicID  int
 	WatchdogAlertUsername string
@@ -46,6 +52,24 @@ func LoadConfig() *Config {
 	}
 
 	appID, _ := strconv.Atoi(os.Getenv("TELEGRAM_APP_ID"))
+	sessionFile := strings.TrimSpace(os.Getenv("TELEGRAM_SESSION_FILE"))
+	sessionDir := strings.TrimSpace(os.Getenv("TELEGRAM_SESSION_DIR"))
+	if sessionDir == "" {
+		if sessionFile != "" {
+			dir := filepath.Dir(sessionFile)
+			if dir != "" && dir != "." {
+				sessionDir = dir
+			}
+		}
+		if sessionDir == "" {
+			sessionDir = "session"
+		}
+	}
+
+	encKey := strings.TrimSpace(os.Getenv("ENCRYPTION_KEY"))
+	if encKey == "" {
+		encKey = strings.TrimSpace(os.Getenv("JWT_SECRET"))
+	}
 
 	interval := defaultWatchdogInterval
 	if rawInterval := strings.TrimSpace(os.Getenv("WATCHDOG_INTERVAL_SECONDS")); rawInterval != "" {
@@ -72,6 +96,13 @@ func LoadConfig() *Config {
 		serviceName = "wa-gateway"
 	}
 
+	var watchdogAccountID uint
+	if rawAccID := strings.TrimSpace(os.Getenv("WATCHDOG_ACCOUNT_ID")); rawAccID != "" {
+		if parsed, convErr := strconv.ParseUint(rawAccID, 10, 64); convErr == nil {
+			watchdogAccountID = uint(parsed)
+		}
+	}
+
 	var alertChatID int64
 	if rawChatID := strings.TrimSpace(os.Getenv("WATCHDOG_ALERT_CHAT_ID")); rawChatID != "" {
 		alertChatID, _ = strconv.ParseInt(rawChatID, 10, 64)
@@ -85,7 +116,11 @@ func LoadConfig() *Config {
 	return &Config{
 		AppID:                 appID,
 		AppHash:               os.Getenv("TELEGRAM_APP_HASH"),
-		SessionFile:           os.Getenv("TELEGRAM_SESSION_FILE"),
+		SessionFile:           sessionFile,
+		SessionDir:            sessionDir,
+		PhoneNumber:           strings.TrimSpace(os.Getenv("PHONE_NUMBER")),
+		Password:              os.Getenv("PASSWORD"),
+		EncryptionKey:         encKey,
 		DBHost:                os.Getenv("DB_HOST"),
 		DBUser:                os.Getenv("DB_USER"),
 		DBPass:                os.Getenv("DB_PASS"),
@@ -98,6 +133,7 @@ func LoadConfig() *Config {
 		WatchdogInterval:      interval,
 		WatchdogFailThreshold: failThreshold,
 		WatchdogServiceName:   serviceName,
+		WatchdogAccountID:     watchdogAccountID,
 		WatchdogAlertChatID:   alertChatID,
 		WatchdogAlertTopicID:  alertTopicID,
 		WatchdogAlertUsername: strings.TrimSpace(os.Getenv("WATCHDOG_ALERT_USERNAME")),

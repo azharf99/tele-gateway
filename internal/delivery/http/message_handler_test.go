@@ -158,6 +158,18 @@ func TestMessageHandler_SendMessage(t *testing.T) {
 			wantCode: http.StatusNotFound,
 		},
 		{
+			name:     "account not found error",
+			body:     `{"account_id":99,"chat_id":123,"message":"hello"}`,
+			ucErr:    domain.ErrAccountNotFound,
+			wantCode: http.StatusNotFound,
+		},
+		{
+			name:     "account b2b disabled error",
+			body:     `{"account_id":2,"chat_id":123,"message":"hello"}`,
+			ucErr:    domain.ErrB2BNotEnabled,
+			wantCode: http.StatusForbidden,
+		},
+		{
 			name:     "bot not running error",
 			body:     `{"chat_id":123,"message":"hello"}`,
 			ucErr:    domain.ErrBotNotRunning,

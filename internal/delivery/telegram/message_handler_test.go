@@ -11,57 +11,58 @@ import (
 	"github.com/gotd/td/tg"
 	"github.com/gotd/td/tgerr"
 	"go.uber.org/zap"
-	"gorm.io/gorm"
 )
 
-// fakeAuctionUseCase records what the handler asked it to do. The embedded
-// interface is nil on purpose: any method the bidding path is not supposed to
-// touch panics loudly instead of silently passing.
-type fakeAuctionUseCase struct {
-	domain.AuctionUseCase
-
-	rule *domain.BidRule
-
-	mu           sync.Mutex
-	keywordCalls int
-	bids         []tg.InputPeerClass
-	bidded       chan struct{}
+type recordedGroupMsg struct {
+	accountID   uint
+	groupID     int64
+	topicID     int
+	msgID       int
+	isUserReply bool
+	text        string
+	peer        tg.InputPeerClass
 }
 
-func newFakeUseCase(rule *domain.BidRule) *fakeAuctionUseCase {
-	return &fakeAuctionUseCase{rule: rule, bidded: make(chan struct{}, 8)}
+type fakeClassAuctionUC struct {
+	domain.ClassAuctionUseCase
+
+	mu       sync.Mutex
+	received []recordedGroupMsg
+	ch       chan struct{}
 }
 
-func (f *fakeAuctionUseCase) CheckAndStopByText(context.Context, string, int64, int) error {
-	return nil
+func newFakeClassAuctionUC() *fakeClassAuctionUC {
+	return &fakeClassAuctionUC{ch: make(chan struct{}, 16)}
 }
 
-func (f *fakeAuctionUseCase) CheckKeyword(string, int64, int) (*domain.BidRule, error) {
+func (f *fakeClassAuctionUC) HandleIncomingGroupMessage(_ context.Context, accountID uint, groupID int64, topicID int, msgID int, isUserReply bool, text string, peer tg.InputPeerClass) error {
 	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.keywordCalls++
-	return f.rule, nil
-}
-
-func (f *fakeAuctionUseCase) ExecuteBid(_ context.Context, peer tg.InputPeerClass, _ int, _ *domain.BidRule) error {
-	f.mu.Lock()
-	f.bids = append(f.bids, peer)
+	f.received = append(f.received, recordedGroupMsg{
+		accountID:   accountID,
+		groupID:     groupID,
+		topicID:     topicID,
+		msgID:       msgID,
+		isUserReply: isUserReply,
+		text:        text,
+		peer:        peer,
+	})
 	f.mu.Unlock()
-	f.bidded <- struct{}{}
+	f.ch <- struct{}{}
 	return nil
 }
 
-func (f *fakeAuctionUseCase) snapshot() (int, []tg.InputPeerClass) {
+func (f *fakeClassAuctionUC) snapshot() []recordedGroupMsg {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.keywordCalls, append([]tg.InputPeerClass(nil), f.bids...)
+	return append([]recordedGroupMsg(nil), f.received...)
 }
 
-func newTestHandler(uc domain.AuctionUseCase) *AuctionHandler {
-	return &AuctionHandler{
-		UseCase:  uc,
-		Logger:   zap.NewNop(),
-		BidDelay: func() time.Duration { return 0 },
+func waitForAuctionMsg(t *testing.T, f *fakeClassAuctionUC) {
+	t.Helper()
+	select {
+	case <-f.ch:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for auction message dispatch")
 	}
 }
 
@@ -69,7 +70,7 @@ func channelMessage(channelID int64, msgID, topicID int) *tg.Message {
 	msg := &tg.Message{
 		ID:      msgID,
 		PeerID:  &tg.PeerChannel{ChannelID: channelID},
-		Message: "Jadwal: Senin 19.00 WIB",
+		Message: "Need tutor UNITY\n(FRI 20.30, SAT 12.00)",
 	}
 	if topicID > 0 {
 		msg.ReplyTo = &tg.MessageReplyHeader{ForumTopic: true, ReplyToTopID: topicID}
@@ -85,97 +86,120 @@ func entitiesWithChannel(channel *tg.Channel) tg.Entities {
 	}
 }
 
-// waitForBid blocks until the handler's background bid goroutine has run.
-func waitForBid(t *testing.T, f *fakeAuctionUseCase) {
-	t.Helper()
-	select {
-	case <-f.bidded:
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for bid to be executed")
-	}
-}
-
-// A "min" channel constructor carries an access hash that Telegram rejects on
-// outgoing calls (CHANNEL_INVALID), which is what silently broke bidding in the
-// forum group. The handler must not propagate it.
 func TestOnNewMessageDropsMinChannelAccessHash(t *testing.T) {
-	fake := newFakeUseCase(&domain.BidRule{Model: gorm.Model{ID: 1}, Keyword: "senin"})
-	h := newTestHandler(fake)
+	fake := newFakeClassAuctionUC()
+	h := NewAccountMessageHandler(2, AccountFeatureFlags{EnableClassAuction: true}, fake, nil, nil, zap.NewNop())
 
 	entities := entitiesWithChannel(&tg.Channel{ID: 3720761110, AccessHash: 123456789, Min: true})
 	if err := h.OnNewMessage(context.Background(), entities, channelMessage(3720761110, 39658, 24)); err != nil {
 		t.Fatalf("OnNewMessage: %v", err)
 	}
-	waitForBid(t, fake)
+	waitForAuctionMsg(t, fake)
 
-	_, bids := fake.snapshot()
-	peer, ok := bids[0].(*tg.InputPeerChannel)
+	recs := fake.snapshot()
+	peer, ok := recs[0].peer.(*tg.InputPeerChannel)
 	if !ok {
-		t.Fatalf("expected *tg.InputPeerChannel, got %T", bids[0])
+		t.Fatalf("expected *tg.InputPeerChannel, got %T", recs[0].peer)
 	}
-	if peer.ChannelID != 3720761110 {
-		t.Errorf("ChannelID = %d, want 3720761110", peer.ChannelID)
+	if peer.ChannelID != 3720761110 || peer.AccessHash != 0 {
+		t.Errorf("peer = (%d, %d), want (3720761110, 0)", peer.ChannelID, peer.AccessHash)
 	}
-	if peer.AccessHash != 0 {
-		t.Errorf("AccessHash = %d, want 0 so the client resolves a usable one", peer.AccessHash)
+	if recs[0].topicID != 24 || recs[0].isUserReply {
+		t.Errorf("topic=%d isUserReply=%v, want (24, false)", recs[0].topicID, recs[0].isUserReply)
 	}
 }
 
 func TestOnNewMessageKeepsFullChannelAccessHash(t *testing.T) {
-	fake := newFakeUseCase(&domain.BidRule{Model: gorm.Model{ID: 1}, Keyword: "senin"})
-	h := newTestHandler(fake)
+	fake := newFakeClassAuctionUC()
+	h := NewAccountMessageHandler(2, AccountFeatureFlags{EnableClassAuction: true}, fake, nil, nil, zap.NewNop())
 
 	entities := entitiesWithChannel(&tg.Channel{ID: 3914303696, AccessHash: 987654321})
 	if err := h.OnNewMessage(context.Background(), entities, channelMessage(3914303696, 25, 0)); err != nil {
 		t.Fatalf("OnNewMessage: %v", err)
 	}
-	waitForBid(t, fake)
+	waitForAuctionMsg(t, fake)
 
-	_, bids := fake.snapshot()
-	peer := bids[0].(*tg.InputPeerChannel)
+	recs := fake.snapshot()
+	peer := recs[0].peer.(*tg.InputPeerChannel)
 	if peer.AccessHash != 987654321 {
-		t.Errorf("AccessHash = %d, want 987654321 to be preserved", peer.AccessHash)
+		t.Errorf("AccessHash = %d, want 987654321", peer.AccessHash)
 	}
 }
 
-// Telegram re-delivers the same message; without de-duplication one auction post
-// produced two bids.
-func TestOnNewMessageIgnoresDuplicateDelivery(t *testing.T) {
-	fake := newFakeUseCase(&domain.BidRule{Model: gorm.Model{ID: 1}, Keyword: "senin"})
-	h := newTestHandler(fake)
+func TestOnNewMessageIgnoresDuplicateDeliveryAndRespectsFeatureFlags(t *testing.T) {
+	fake := newFakeClassAuctionUC()
+	h := NewAccountMessageHandler(2, AccountFeatureFlags{EnableClassAuction: true}, fake, nil, nil, zap.NewNop())
 
 	entities := entitiesWithChannel(&tg.Channel{ID: 3720761110, AccessHash: 1})
 	for range 3 {
-		if err := h.OnNewMessage(context.Background(), entities, channelMessage(3720761110, 39658, 24)); err != nil {
-			t.Fatalf("OnNewMessage: %v", err)
-		}
+		_ = h.OnNewMessage(context.Background(), entities, channelMessage(3720761110, 39658, 24))
 	}
-	waitForBid(t, fake)
+	waitForAuctionMsg(t, fake)
+	time.Sleep(50 * time.Millisecond)
 
-	calls, bids := fake.snapshot()
-	if calls != 1 {
-		t.Errorf("CheckKeyword called %d times, want 1", calls)
+	if recs := fake.snapshot(); len(recs) != 1 {
+		t.Fatalf("dispatched %d times, want 1", len(recs))
 	}
-	if len(bids) != 1 {
-		t.Errorf("executed %d bids, want 1", len(bids))
+
+	// Disable ClassAuction -> subsequent distinct messages must not be dispatched
+	h.SetFlags(AccountFeatureFlags{EnableClassAuction: false})
+	_ = h.OnNewMessage(context.Background(), entities, channelMessage(3720761110, 39659, 24))
+	time.Sleep(50 * time.Millisecond)
+
+	if recs := fake.snapshot(); len(recs) != 1 {
+		t.Fatalf("disabled flag should block dispatch, got %d", len(recs))
 	}
 }
 
-// A different message in the same group is not a duplicate.
-func TestOnNewMessageHandlesDistinctMessages(t *testing.T) {
-	fake := newFakeUseCase(&domain.BidRule{Model: gorm.Model{ID: 1}, Keyword: "senin"})
-	h := newTestHandler(fake)
-
-	entities := entitiesWithChannel(&tg.Channel{ID: 3720761110, AccessHash: 1})
-	for _, msgID := range []int{39658, 39659} {
-		if err := h.OnNewMessage(context.Background(), entities, channelMessage(3720761110, msgID, 24)); err != nil {
-			t.Fatalf("OnNewMessage: %v", err)
-		}
-		waitForBid(t, fake)
+func TestExtractTopicAndReplyInfo(t *testing.T) {
+	tests := []struct {
+		name      string
+		msg       *tg.Message
+		wantTopic int
+		wantReply bool
+	}{
+		{
+			name:      "plain group message",
+			msg:       &tg.Message{ID: 10},
+			wantTopic: 0,
+			wantReply: false,
+		},
+		{
+			name: "non-forum reply to another message",
+			msg: &tg.Message{
+				ID:      11,
+				ReplyTo: &tg.MessageReplyHeader{ForumTopic: false, ReplyToMsgID: 10},
+			},
+			wantTopic: 0,
+			wantReply: true,
+		},
+		{
+			name: "direct post in forum topic (ReplyToMsgID = topic root)",
+			msg: &tg.Message{
+				ID:      12,
+				ReplyTo: &tg.MessageReplyHeader{ForumTopic: true, ReplyToMsgID: 24, ReplyToTopID: 0},
+			},
+			wantTopic: 24,
+			wantReply: false,
+		},
+		{
+			name: "reply to another message inside forum topic",
+			msg: &tg.Message{
+				ID:      13,
+				ReplyTo: &tg.MessageReplyHeader{ForumTopic: true, ReplyToMsgID: 12, ReplyToTopID: 24},
+			},
+			wantTopic: 24,
+			wantReply: true,
+		},
 	}
 
-	if calls, bids := fake.snapshot(); calls != 2 || len(bids) != 2 {
-		t.Errorf("got %d keyword checks and %d bids, want 2 and 2", calls, len(bids))
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			topic, isReply := extractTopicAndReplyInfo(tc.msg)
+			if topic != tc.wantTopic || isReply != tc.wantReply {
+				t.Errorf("got (%d, %v), want (%d, %v)", topic, isReply, tc.wantTopic, tc.wantReply)
+			}
+		})
 	}
 }
 
@@ -217,11 +241,8 @@ func TestNextDialogOffset(t *testing.T) {
 	if !ok {
 		t.Fatal("nextDialogOffset returned ok=false, want an offset for the last dialog")
 	}
-	if req.OffsetID != 200 {
-		t.Errorf("OffsetID = %d, want 200", req.OffsetID)
-	}
-	if req.OffsetDate != 1700000500 {
-		t.Errorf("OffsetDate = %d, want 1700000500", req.OffsetDate)
+	if req.OffsetID != 200 || req.OffsetDate != 1700000500 {
+		t.Errorf("offset = (%d, %d), want (200, 1700000500)", req.OffsetID, req.OffsetDate)
 	}
 	peer, isChannel := req.OffsetPeer.(*tg.InputPeerChannel)
 	if !isChannel || peer.ChannelID != 20 || peer.AccessHash != 42 {

@@ -57,54 +57,125 @@ func NewTelegramClient(appID int, appHash string, sessionPath string, handler te
 	}, nil
 }
 
-func (c *TelegramClient) Start(ctx context.Context, phone, password string, logger *zap.Logger, otpProvider func(context.Context) (string, error), onSuccess func()) error {
-	flow := auth.NewFlow(
-		auth.Constant(phone, password, auth.CodeAuthenticatorFunc(func(ctx context.Context, sentCode *tg.AuthSentCode) (string, error) {
-			logger.Info("Waiting for OTP...")
-			if otpProvider != nil {
-				code, err := otpProvider(ctx)
-				if err == nil {
-					return code, nil
-				}
-				logger.Warn("Failed to get OTP from provider, falling back to Console", zap.Error(err))
-			}
+type StartCallbacks struct {
+	OTPProvider      func(ctx context.Context) (string, error)
+	PasswordProvider func(ctx context.Context) (string, error)
+	OnStatusChange   func(status domain.AccountStatus, user *tg.User, errMsg string)
+}
 
-			fmt.Print("Enter code (Console Fallback): ")
-			code, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+type accountAuthenticator struct {
+	phone            string
+	storedPassword   string
+	otpProvider      func(ctx context.Context) (string, error)
+	passwordProvider func(ctx context.Context) (string, error)
+	logger           *zap.Logger
+}
+
+func (a accountAuthenticator) Phone(_ context.Context) (string, error) {
+	return a.phone, nil
+}
+
+func (a accountAuthenticator) AcceptTermsOfService(_ context.Context, _ tg.HelpTermsOfService) error {
+	return fmt.Errorf("telegram sign up is not supported")
+}
+
+func (a accountAuthenticator) SignUp(_ context.Context) (auth.UserInfo, error) {
+	return auth.UserInfo{}, fmt.Errorf("telegram sign up is not supported")
+}
+
+func (a accountAuthenticator) Password(ctx context.Context) (string, error) {
+	if strings.TrimSpace(a.storedPassword) != "" {
+		return a.storedPassword, nil
+	}
+	if a.passwordProvider != nil {
+		return a.passwordProvider(ctx)
+	}
+	return "", auth.ErrPasswordNotProvided
+}
+
+func (a accountAuthenticator) Code(ctx context.Context, _ *tg.AuthSentCode) (string, error) {
+	if a.logger != nil {
+		a.logger.Info("Waiting for Telegram OTP...")
+	}
+	if a.otpProvider != nil {
+		code, err := a.otpProvider(ctx)
+		if err == nil {
 			return strings.TrimSpace(code), nil
-		})),
+		}
+		if a.logger != nil {
+			a.logger.Warn("OTP provider failed", zap.Error(err))
+		}
+		return "", err
+	}
+	fmt.Print("Enter code (Console Fallback): ")
+	code, _ := bufio.NewReader(os.Stdin).ReadString('\n')
+	return strings.TrimSpace(code), nil
+}
+
+func (c *TelegramClient) Start(ctx context.Context, phone, password string, logger *zap.Logger, cb StartCallbacks) error {
+	notify := func(status domain.AccountStatus, user *tg.User, errMsg string) {
+		if cb.OnStatusChange != nil {
+			cb.OnStatusChange(status, user, errMsg)
+		}
+	}
+
+	flow := auth.NewFlow(
+		accountAuthenticator{
+			phone:            phone,
+			storedPassword:   password,
+			otpProvider:      cb.OTPProvider,
+			passwordProvider: cb.PasswordProvider,
+			logger:           logger,
+		},
 		auth.SendCodeOptions{},
 	)
+
+	notify(domain.AccountStatusConnecting, nil, "")
 
 	return c.Client.Run(ctx, func(ctx context.Context) error {
 		status, err := c.Client.Auth().Status(ctx)
 		if err == nil && status.Authorized {
-			onSuccess()
-			logger.Info("Bot is authorized", zap.String("username", status.User.Username), zap.Int64("id", status.User.ID))
-		} else {
-			logger.Info("Awaiting login/OTP")
+			notify(domain.AccountStatusRunning, status.User, "")
+			if logger != nil {
+				logger.Info("Account is authorized", zap.String("username", status.User.Username), zap.Int64("id", status.User.ID))
+			}
+		} else if logger != nil {
+			logger.Info("Account awaiting login/OTP", zap.String("phone", phone))
 		}
 
 		if err := c.Client.Auth().IfNecessary(ctx, flow); err != nil {
 			return err
 		}
 
+		// Re-fetch authorized user info after interactive login
+		var selfUser *tg.User
+		if st, err := c.Client.Auth().Status(ctx); err == nil && st.Authorized {
+			selfUser = st.User
+		}
+
 		// Wajib memanggil UpdatesGetState agar server Telegram mulai mengirimkan push updates ke client ini
-		if _, err := tg.NewClient(c.Client).UpdatesGetState(ctx); err != nil {
+		if _, err := tg.NewClient(c.Client).UpdatesGetState(ctx); err != nil && logger != nil {
 			logger.Warn("Failed to fetch initial updates state", zap.Error(err))
 		}
 
 		// Warm the access-hash cache so the very first bid of a session does not
 		// have to pay for a dialog scan (and cannot fail on a stale hash).
-		if err := c.refreshChannelHashes(ctx); err != nil {
+		if err := c.refreshChannelHashes(ctx); err != nil && logger != nil {
 			logger.Warn("Failed to warm channel access hash cache", zap.Error(err))
 		}
 
-		onSuccess()
-		logger.Info("Userbot is running...")
+		notify(domain.AccountStatusRunning, selfUser, "")
+		if logger != nil {
+			logger.Info("Telegram account client is running", zap.String("phone", phone))
+		}
 		<-ctx.Done()
 		return nil
 	})
+}
+
+// SendSavedMessage sends a notification to the account's own Saved Messages chat.
+func (c *TelegramClient) SendSavedMessage(ctx context.Context, text string) error {
+	return c.send(ctx, &tg.InputPeerSelf{}, 0, text)
 }
 
 // Implementasi interface TelegramService yang ada di usecase

@@ -14,8 +14,8 @@ type AIContext struct {
 }
 
 type AIGatewayUseCase interface {
-	HandlePrivateMessage(ctx context.Context, senderID int64, senderName string, text string, replyFunc func(string) error) error
-	
+	HandlePrivateMessage(ctx context.Context, accountID uint, senderID int64, senderName string, promptOverride string, text string, replyFunc func(string) error) error
+
 	// API Methods for context management
 	SetAIContext(key, value string) error
 	GetAIContext(key string) (string, error)

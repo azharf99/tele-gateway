@@ -26,6 +26,7 @@ type WatchdogConfig struct {
 	Interval         time.Duration
 	FailThreshold    int
 	ServiceName      string
+	AlertAccountID   uint
 	AlertChatID      int64
 	AlertTopicID     int
 	AlertUsername    string
@@ -227,10 +228,11 @@ func (w *HealthWatchdog) probe(ctx context.Context) (string, healthResponse, boo
 
 func (w *HealthWatchdog) sendAlert(ctx context.Context, message string) error {
 	return w.msgUC.SendMessage(ctx, domain.SendMessageRequest{
-		ChatID:   w.cfg.AlertChatID,
-		TopicID:  w.cfg.AlertTopicID,
-		Username: w.cfg.AlertUsername,
-		Message:  message,
+		AccountID: w.cfg.AlertAccountID,
+		ChatID:    w.cfg.AlertChatID,
+		TopicID:   w.cfg.AlertTopicID,
+		Username:  w.cfg.AlertUsername,
+		Message:   message,
 	})
 }
 

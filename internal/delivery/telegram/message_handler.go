@@ -4,7 +4,6 @@ package telegram
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"sync"
 	"time"
 
@@ -14,39 +13,63 @@ import (
 )
 
 // seenMessageTTL is how long a (peer, message) pair is remembered for
-// de-duplication. Comfortably longer than the 2–5s bid delay, short enough that
-// the map stays small.
+// de-duplication so Telegram re-deliveries in multiple envelopes never double-fire.
 const seenMessageTTL = 5 * time.Minute
 
-type AuctionHandler struct {
-	UseCase   domain.AuctionUseCase
-	AIUseCase domain.AIGatewayUseCase
+type AccountFeatureFlags struct {
+	EnableAIGateway    bool
+	AISystemPrompt     string
+	EnableClassAuction bool
+}
+
+type AccountMessageHandler struct {
+	AccountID uint
+	AuctionUC domain.ClassAuctionUseCase
+	AIUC      domain.AIGatewayUseCase
+	ReplyFunc func(ctx context.Context, peer tg.InputPeerClass, msgID int, text string) error
 	Logger    *zap.Logger
 
-	// BidDelay returns how long to wait before sending a bid. Defaults to a
-	// random 2–5s (human simulation, anti-ban); tests override it.
-	BidDelay func() time.Duration
+	flagMu sync.RWMutex
+	flags  AccountFeatureFlags
 
 	seenMu   sync.Mutex
 	seenMsgs map[string]time.Time
 }
 
-func (h *AuctionHandler) bidDelay() time.Duration {
-	if h.BidDelay != nil {
-		return h.BidDelay()
+func NewAccountMessageHandler(
+	accountID uint,
+	flags AccountFeatureFlags,
+	auctionUC domain.ClassAuctionUseCase,
+	aiUC domain.AIGatewayUseCase,
+	replyFunc func(ctx context.Context, peer tg.InputPeerClass, msgID int, text string) error,
+	logger *zap.Logger,
+) *AccountMessageHandler {
+	return &AccountMessageHandler{
+		AccountID: accountID,
+		AuctionUC: auctionUC,
+		AIUC:      aiUC,
+		ReplyFunc: replyFunc,
+		Logger:    logger,
+		flags:     flags,
+		seenMsgs:  make(map[string]time.Time),
 	}
-	return time.Duration(rand.Intn(3000)+2000) * time.Millisecond
+}
+
+func (h *AccountMessageHandler) SetFlags(flags AccountFeatureFlags) {
+	h.flagMu.Lock()
+	h.flags = flags
+	h.flagMu.Unlock()
+}
+
+func (h *AccountMessageHandler) getFlags() AccountFeatureFlags {
+	h.flagMu.RLock()
+	defer h.flagMu.RUnlock()
+	return h.flags
 }
 
 // alreadyHandled reports whether this exact (peer, message) pair has been
 // processed recently, and records it otherwise.
-//
-// Telegram delivers the same message more than once — the production logs show
-// a single auction post producing two "Keyword detected" lines 150ms apart for
-// the same msg_id, because it arrived both inside *tg.Updates and again in
-// another envelope. Without this guard that posts the bid twice, which is
-// exactly the kind of behaviour that gets a userbot banned.
-func (h *AuctionHandler) alreadyHandled(peerID int64, msgID int) bool {
+func (h *AccountMessageHandler) alreadyHandled(peerID int64, msgID int) bool {
 	key := fmt.Sprintf("%d:%d", peerID, msgID)
 	now := time.Now()
 
@@ -71,63 +94,51 @@ func (h *AuctionHandler) alreadyHandled(peerID int64, msgID int) bool {
 	return false
 }
 
-func (h *AuctionHandler) OnNewMessage(ctx context.Context, entities tg.Entities, msg *tg.Message) error {
-	if msg.Out {
+func (h *AccountMessageHandler) OnNewMessage(ctx context.Context, entities tg.Entities, msg *tg.Message) error {
+	if msg == nil || msg.Out {
 		return nil
 	}
 
 	text := msg.Message
-	topicID := extractTopicID(msg)
+	topicID, isUserReply := extractTopicAndReplyInfo(msg)
 
-	// Manual Extract InputPeer
-	var peer tg.InputPeerClass
-	var groupID int64
-	var isPrivate bool
-	var senderName string
+	var (
+		peer       tg.InputPeerClass
+		peerID     int64
+		isPrivate  bool
+		senderName string
+	)
 
 	switch p := msg.PeerID.(type) {
 	case *tg.PeerUser:
 		isPrivate = true
-		groupID = p.UserID
-		user, ok := entities.Users[p.UserID]
-		if ok {
+		peerID = p.UserID
+		if user, ok := entities.Users[p.UserID]; ok {
 			senderName = fmt.Sprintf("%s %s", user.FirstName, user.LastName)
 			peer = &tg.InputPeerUser{
 				UserID:     user.ID,
 				AccessHash: user.AccessHash,
 			}
 		} else {
-			// Fallback jika user tidak ada di entities (biasanya pada UpdateShort)
 			senderName = "User"
 			peer = &tg.InputPeerUser{
 				UserID:     p.UserID,
-				AccessHash: 0, // Akan dicoba resolusi otomatis oleh library sender
+				AccessHash: 0,
 			}
-			h.Logger.Info("User info missing in entities, using fallback", zap.Int64("user_id", p.UserID))
 		}
 	case *tg.PeerChat:
-		groupID = p.ChatID
+		peerID = p.ChatID
 		peer = &tg.InputPeerChat{
 			ChatID: p.ChatID,
 		}
 	case *tg.PeerChannel:
-		groupID = p.ChannelID
+		peerID = p.ChannelID
 
-		// Only a full channel constructor carries an access hash that Telegram
-		// accepts on outgoing calls. A "min" one is valid just for reading the
-		// update it came with, and sending to it fails with CHANNEL_INVALID —
-		// which is exactly how bids in forum groups were being lost. Leave the
-		// hash at 0 in that case and let the client resolve a real one.
+		// Only a full channel constructor carries an access hash Telegram accepts on
+		// outgoing calls. Leave AccessHash=0 for min/missing channels so client resolves it.
 		var accessHash int64
-		switch channel, ok := entities.Channels[p.ChannelID]; {
-		case ok && !channel.Min:
+		if channel, ok := entities.Channels[p.ChannelID]; ok && !channel.Min {
 			accessHash = channel.AccessHash
-		case ok:
-			h.Logger.Info("Channel entity is min, access hash will be resolved before sending",
-				zap.Int64("channel_id", p.ChannelID))
-		default:
-			h.Logger.Info("Channel not found in entities, access hash will be resolved before sending",
-				zap.Int64("channel_id", p.ChannelID))
 		}
 
 		peer = &tg.InputPeerChannel{
@@ -137,103 +148,96 @@ func (h *AuctionHandler) OnNewMessage(ctx context.Context, entities tg.Entities,
 	}
 
 	if peer == nil {
-		h.Logger.Error("Failed to resolve input peer")
 		return nil
 	}
 
-	if h.alreadyHandled(groupID, msg.ID) {
-		h.Logger.Info("Duplicate update ignored", zap.Int64("group_id", groupID), zap.Int("msg_id", msg.ID))
+	if h.alreadyHandled(peerID, msg.ID) {
 		return nil
 	}
 
-	// Route to AI Gateway if it's a private message
-	if isPrivate && h.AIUseCase != nil {
-		h.Logger.Info("Private message detected, routing to AI Gateway", zap.Int64("user_id", groupID), zap.String("sender", senderName))
-		replyFunc := func(replyText string) error {
-			return h.UseCase.ReplyToUser(context.Background(), peer, msg.ID, replyText)
+	flags := h.getFlags()
+
+	// Route private messages to AI Gateway only if enabled on this account.
+	if isPrivate {
+		if !flags.EnableAIGateway || h.AIUC == nil {
+			return nil
 		}
-		// Run in background to avoid blocking update handler
+		replyFn := func(replyText string) error {
+			if h.ReplyFunc == nil {
+				return fmt.Errorf("reply func not wired")
+			}
+			return h.ReplyFunc(context.Background(), peer, msg.ID, replyText)
+		}
+		promptOverride := flags.AISystemPrompt
 		go func() {
-			err := h.AIUseCase.HandlePrivateMessage(context.Background(), groupID, senderName, text, replyFunc)
-			if err != nil {
-				h.Logger.Error("Failed to handle private message in AI Gateway", zap.Error(err))
+			if err := h.AIUC.HandlePrivateMessage(context.Background(), h.AccountID, peerID, senderName, promptOverride, text, replyFn); err != nil && h.Logger != nil {
+				h.Logger.Error("Failed to handle private message in AI Gateway",
+					zap.Uint("account_id", h.AccountID),
+					zap.Error(err))
 			}
 		}()
 		return nil
 	}
 
-	// DIAGNOSTIC: promoted to Info so the bidding path is visible under zap.NewProduction().
-	// Compare group_id/topic_id here against the target_group_id/topic_id in your bid_rules row.
-	h.Logger.Info("Incoming group/channel message",
-		zap.Int64("group_id", groupID),
-		zap.Int("topic_id", topicID),
-		zap.Int("msg_id", msg.ID),
-		zap.String("text", text),
-	)
-
-	// Existing Bidding Logic
-	err := h.UseCase.CheckAndStopByText(ctx, text, groupID, topicID)
-	if err != nil {
-		h.Logger.Error("Failed to check stop keywords", zap.Error(err))
-	}
-
-	rule, err := h.UseCase.CheckKeyword(text, groupID, topicID)
-	if err == nil && rule != nil && !rule.HasBidded {
-		h.Logger.Info("Keyword detected, scheduling bid...", zap.String("keyword", rule.Keyword), zap.Int("topic_id", topicID), zap.Int("msg_id", msg.ID))
-
-		go func(r *domain.BidRule, p tg.InputPeerClass, mID int) {
-			time.Sleep(h.bidDelay())
-
-			err := h.UseCase.ExecuteBid(context.Background(), p, mID, r)
-			if err != nil {
-				h.Logger.Error("Failed to execute bid", zap.Error(err))
-			}
-		}(rule, peer, msg.ID)
-
+	// Route group/channel messages to zero-delay Class Auction engine if enabled on this account.
+	if !flags.EnableClassAuction || h.AuctionUC == nil {
 		return nil
 	}
 
-	// DIAGNOSTIC: explain why no bid was scheduled instead of silently returning.
-	switch {
-	case err != nil:
-		h.Logger.Info("No matching bid rule for message",
-			zap.Int64("group_id", groupID),
-			zap.Int("topic_id", topicID),
-			zap.Error(err))
-	case rule != nil && rule.HasBidded:
-		h.Logger.Info("Matching rule found but already bidded (has_bidded=true)",
-			zap.Uint("rule_id", rule.ID),
-			zap.String("keyword", rule.Keyword))
-	default:
-		h.Logger.Info("No bid scheduled (no active rule matched)",
-			zap.Int64("group_id", groupID),
-			zap.Int("topic_id", topicID))
-	}
+	// Dispatch immediately in a goroutine so the MTProto update loop never blocks.
+	// Delay is controlled inside ClassAuctionUseCase (defaults to 0ms for instant reply).
+	go func(gID int64, tID int, mID int, reply bool, body string, p tg.InputPeerClass) {
+		if err := h.AuctionUC.HandleIncomingGroupMessage(context.Background(), h.AccountID, gID, tID, mID, reply, body, p); err != nil && h.Logger != nil {
+			h.Logger.Error("Class auction handler error",
+				zap.Uint("account_id", h.AccountID),
+				zap.Int64("group_id", gID),
+				zap.Int("msg_id", mID),
+				zap.Error(err))
+		}
+	}(peerID, topicID, msg.ID, isUserReply, text, peer)
+
 	return nil
 }
 
-func extractTopicID(msg *tg.Message) int {
-	if msg == nil {
-		return 0
+// extractTopicAndReplyInfo extracts the forum topic ID (0 for general/non-forum)
+// and distinguishes a top-level forum topic post from a reply to another user's message.
+func extractTopicAndReplyInfo(msg *tg.Message) (topicID int, isUserReply bool) {
+	if msg == nil || msg.ReplyTo == nil {
+		return 0, false
 	}
 
-	if msg.ReplyTo != nil {
-		if header, ok := msg.ReplyTo.(*tg.MessageReplyHeader); ok {
-			if header.ReplyToTopID > 0 {
-				return header.ReplyToTopID
+	header, ok := msg.ReplyTo.(*tg.MessageReplyHeader)
+	if !ok {
+		return 0, false
+	}
+
+	if header.ForumTopic {
+		if header.ReplyToTopID > 0 {
+			topicID = header.ReplyToTopID
+			// In a forum topic, replying to another specific message sets ReplyToMsgID != ReplyToTopID.
+			if header.ReplyToMsgID > 0 && header.ReplyToMsgID != header.ReplyToTopID {
+				isUserReply = true
 			}
-			if header.ForumTopic && header.ReplyToMsgID > 0 {
-				return header.ReplyToMsgID
-			}
+			return topicID, isUserReply
 		}
+		if header.ReplyToMsgID > 0 {
+			// Direct top-level message inside a forum topic (ReplyToMsgID is the topic root ID).
+			return header.ReplyToMsgID, false
+		}
+		return 0, false
 	}
 
-	return 0
+	// Non-forum group/chat: any ReplyToMsgID > 0 is a reply to another message.
+	if header.ReplyToMsgID > 0 {
+		return 0, true
+	}
+	return 0, false
 }
 
-// Implementasi UpdateHandler dari gotd
-func (h *AuctionHandler) Handle(ctx context.Context, u tg.UpdatesClass) error {
-	h.Logger.Info("Incoming UpdatesClass", zap.String("type", fmt.Sprintf("%T", u)))
+// Handle implements gotd's telegram.UpdateHandler.
+// Intentionally ignores UpdateEditMessage / UpdateEditChannelMessage so CS edits
+// (e.g. appending "SOLD") never trigger a duplicate bid.
+func (h *AccountMessageHandler) Handle(ctx context.Context, u tg.UpdatesClass) error {
 	switch updates := u.(type) {
 	case *tg.UpdateShortMessage:
 		if updates.Out {
@@ -242,109 +246,79 @@ func (h *AuctionHandler) Handle(ctx context.Context, u tg.UpdatesClass) error {
 		if h.alreadyHandled(updates.UserID, updates.ID) {
 			return nil
 		}
-		h.Logger.Info("Private message detected (short)", zap.Int64("user_id", updates.UserID))
-		if h.AIUseCase != nil {
-			peer := &tg.InputPeerUser{
-				UserID: updates.UserID,
-			}
-			replyFunc := func(replyText string) error {
-				return h.UseCase.ReplyToUser(context.Background(), peer, updates.ID, replyText)
-			}
-			go func() {
-				err := h.AIUseCase.HandlePrivateMessage(context.Background(), updates.UserID, "User", updates.Message, replyFunc)
-				if err != nil {
-					h.Logger.Error("Failed to handle short private message in AI Gateway", zap.Error(err))
-				}
-			}()
+		flags := h.getFlags()
+		if !flags.EnableAIGateway || h.AIUC == nil {
+			return nil
 		}
+		peer := &tg.InputPeerUser{UserID: updates.UserID}
+		replyFn := func(replyText string) error {
+			if h.ReplyFunc == nil {
+				return fmt.Errorf("reply func not wired")
+			}
+			return h.ReplyFunc(context.Background(), peer, updates.ID, replyText)
+		}
+		promptOverride := flags.AISystemPrompt
+		go func() {
+			if err := h.AIUC.HandlePrivateMessage(context.Background(), h.AccountID, updates.UserID, "User", promptOverride, updates.Message, replyFn); err != nil && h.Logger != nil {
+				h.Logger.Error("Failed to handle short private message in AI Gateway",
+					zap.Uint("account_id", h.AccountID),
+					zap.Error(err))
+			}
+		}()
+
 	case *tg.Updates:
-		entities := tg.Entities{
-			Users:    make(map[int64]*tg.User),
-			Chats:    make(map[int64]*tg.Chat),
-			Channels: make(map[int64]*tg.Channel),
-		}
-
-		for _, userClass := range updates.GetUsers() {
-			if user, ok := userClass.(*tg.User); ok {
-				entities.Users[user.ID] = user
-			}
-		}
-		for _, chatClass := range updates.GetChats() {
-			if chat, ok := chatClass.(*tg.Chat); ok {
-				entities.Chats[chat.ID] = chat
-			} else if channel, ok := chatClass.(*tg.Channel); ok {
-				entities.Channels[channel.ID] = channel
-			}
-		}
-
+		entities := buildEntities(updates.GetUsers(), updates.GetChats())
 		for _, update := range updates.Updates {
-			switch upd := update.(type) {
-			case *tg.UpdateNewMessage:
-				if msg, ok := upd.Message.(*tg.Message); ok {
-					_ = h.OnNewMessage(ctx, entities, msg)
-				}
-			case *tg.UpdateNewChannelMessage:
-				if msg, ok := upd.Message.(*tg.Message); ok {
-					_ = h.OnNewMessage(ctx, entities, msg)
-				}
-			}
+			h.dispatchUpdate(ctx, entities, update)
 		}
+
 	case *tg.UpdatesCombined:
-		entities := tg.Entities{
+		entities := buildEntities(updates.GetUsers(), updates.GetChats())
+		for _, update := range updates.Updates {
+			h.dispatchUpdate(ctx, entities, update)
+		}
+
+	case *tg.UpdateShort:
+		emptyEntities := tg.Entities{
 			Users:    make(map[int64]*tg.User),
 			Chats:    make(map[int64]*tg.Chat),
 			Channels: make(map[int64]*tg.Channel),
 		}
-
-		for _, userClass := range updates.GetUsers() {
-			if user, ok := userClass.(*tg.User); ok {
-				entities.Users[user.ID] = user
-			}
-		}
-		for _, chatClass := range updates.GetChats() {
-			if chat, ok := chatClass.(*tg.Chat); ok {
-				entities.Chats[chat.ID] = chat
-			} else if channel, ok := chatClass.(*tg.Channel); ok {
-				entities.Channels[channel.ID] = channel
-			}
-		}
-
-		for _, update := range updates.Updates {
-			switch upd := update.(type) {
-			case *tg.UpdateNewMessage:
-				if msg, ok := upd.Message.(*tg.Message); ok {
-					_ = h.OnNewMessage(ctx, entities, msg)
-				}
-			case *tg.UpdateNewChannelMessage:
-				if msg, ok := upd.Message.(*tg.Message); ok {
-					_ = h.OnNewMessage(ctx, entities, msg)
-				}
-			}
-		}
-	case *tg.UpdateShort:
-		h.Logger.Info("Handling short update", zap.String("inner_type", fmt.Sprintf("%T", updates.Update)))
-		switch upd := updates.Update.(type) {
-		case *tg.UpdateNewMessage:
-			if msg, ok := upd.Message.(*tg.Message); ok {
-				// For UpdateShort, we don't have entities. We'll pass empty ones
-				// and OnNewMessage should handle it gracefully or we should fetch them.
-				_ = h.OnNewMessage(ctx, tg.Entities{
-					Users:    make(map[int64]*tg.User),
-					Chats:    make(map[int64]*tg.Chat),
-					Channels: make(map[int64]*tg.Channel),
-				}, msg)
-			}
-		case *tg.UpdateNewChannelMessage:
-			if msg, ok := upd.Message.(*tg.Message); ok {
-				_ = h.OnNewMessage(ctx, tg.Entities{
-					Users:    make(map[int64]*tg.User),
-					Chats:    make(map[int64]*tg.Chat),
-					Channels: make(map[int64]*tg.Channel),
-				}, msg)
-			}
-		}
-	default:
-		h.Logger.Warn("Unhandled update type", zap.String("type", fmt.Sprintf("%T", u)))
+		h.dispatchUpdate(ctx, emptyEntities, updates.Update)
 	}
 	return nil
+}
+
+func (h *AccountMessageHandler) dispatchUpdate(ctx context.Context, entities tg.Entities, update tg.UpdateClass) {
+	switch upd := update.(type) {
+	case *tg.UpdateNewMessage:
+		if msg, ok := upd.Message.(*tg.Message); ok {
+			_ = h.OnNewMessage(ctx, entities, msg)
+		}
+	case *tg.UpdateNewChannelMessage:
+		if msg, ok := upd.Message.(*tg.Message); ok {
+			_ = h.OnNewMessage(ctx, entities, msg)
+		}
+	}
+}
+
+func buildEntities(users []tg.UserClass, chats []tg.ChatClass) tg.Entities {
+	entities := tg.Entities{
+		Users:    make(map[int64]*tg.User, len(users)),
+		Chats:    make(map[int64]*tg.Chat),
+		Channels: make(map[int64]*tg.Channel),
+	}
+	for _, userClass := range users {
+		if user, ok := userClass.(*tg.User); ok {
+			entities.Users[user.ID] = user
+		}
+	}
+	for _, chatClass := range chats {
+		if chat, ok := chatClass.(*tg.Chat); ok {
+			entities.Chats[chat.ID] = chat
+		} else if channel, ok := chatClass.(*tg.Channel); ok {
+			entities.Channels[channel.ID] = channel
+		}
+	}
+	return entities
 }

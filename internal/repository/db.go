@@ -45,8 +45,25 @@ func InitDB(cfg *config.Config) (*gorm.DB, error) {
 		time.Sleep(dbConnectBackoff)
 	}
 
+	// Pre-migrate legacy single-account telegram_groups table safely to composite PK (account_id, id)
+	if db.Migrator().HasTable(&domain.TelegramGroup{}) && !db.Migrator().HasColumn(&domain.TelegramGroup{}, "account_id") {
+		_ = db.Exec(`ALTER TABLE telegram_groups ADD COLUMN IF NOT EXISTS account_id bigint NOT NULL DEFAULT 1`).Error
+		_ = db.Exec(`ALTER TABLE telegram_groups DROP CONSTRAINT IF EXISTS telegram_groups_pkey`).Error
+		_ = db.Exec(`ALTER TABLE telegram_groups ADD PRIMARY KEY (account_id, id)`).Error
+	}
+
 	// Auto Migration
-	err = db.AutoMigrate(&domain.BidRule{}, &domain.User{}, &domain.TelegramGroup{}, &domain.AIContext{})
+	err = db.AutoMigrate(
+		&domain.User{},
+		&domain.AIContext{},
+		&domain.TelegramAccount{},
+		&domain.TelegramGroup{},
+		&domain.ClassAuctionProfile{},
+		&domain.WatchedTarget{},
+		&domain.WeeklyAvailability{},
+		&domain.DateAvailabilityOverride{},
+		&domain.AuctionLog{},
+	)
 	if err != nil {
 		return nil, err
 	}

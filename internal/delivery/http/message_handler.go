@@ -32,8 +32,10 @@ func (h *MessageHandler) SendMessage(c *gin.Context) {
 		switch {
 		case errors.Is(err, domain.ErrInvalidTarget):
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		case errors.Is(err, domain.ErrTargetNotFound):
+		case errors.Is(err, domain.ErrTargetNotFound), errors.Is(err, domain.ErrAccountNotFound):
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+		case errors.Is(err, domain.ErrB2BNotEnabled):
+			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
 		case errors.Is(err, domain.ErrBotNotRunning):
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": err.Error()})
 		default:

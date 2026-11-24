@@ -7,10 +7,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/azharf99/tele-gateway/internal/config"
 	deliveryHttp "github.com/azharf99/tele-gateway/internal/delivery/http"
 	"github.com/azharf99/tele-gateway/internal/delivery/telegram"
+	"github.com/azharf99/tele-gateway/internal/parser"
 	"github.com/azharf99/tele-gateway/internal/repository"
 	"github.com/azharf99/tele-gateway/internal/seeder"
 	"github.com/azharf99/tele-gateway/internal/usecase"
@@ -30,86 +32,102 @@ func main() {
 		logger.Fatal("failed to connect to database", zap.Error(err))
 	}
 
-	// 2. Setup Dependency Injection
+	// 2. Setup Repositories
 	userRepo := repository.NewUserRepository(db)
-	bidRepo := repository.NewBidRepository(db)
+	accountRepo := repository.NewTelegramAccountRepository(db, cfg.EncryptionKey)
 	groupRepo := repository.NewTelegramGroupRepository(db)
 	aiRepo := repository.NewAIContextRepository(db)
+	auctionRepo := repository.NewClassAuctionRepository(db)
 
-	// Create Default Admin if not exists
+	// Seed default admin & auto-migrate existing single-account .env deployment as Account #1
 	seeder.SeedAdmin(userRepo, logger)
+	seeder.SeedLegacyAccount(accountRepo, cfg, logger)
 
-	handlerTg := &telegram.AuctionHandler{
-		Logger: logger,
-	}
-
+	// 3. Setup UseCases & Telegram Multi-Account Manager
 	aiUC, err := usecase.NewAIGatewayUseCase(aiRepo, cfg.GeminiAPIKey, logger)
 	if err != nil {
 		logger.Fatal("failed to init ai gateway usecase", zap.Error(err))
 	}
-	handlerTg.AIUseCase = aiUC
 
-	tgClient, err := telegram.NewTelegramClient(cfg.AppID, cfg.AppHash, cfg.SessionFile, handlerTg, logger)
+	aiFallbackParser, err := parser.NewAIFallbackParser(cfg.GeminiAPIKey, logger)
 	if err != nil {
-		logger.Fatal("failed to init telegram client", zap.Error(err))
+		logger.Warn("AI fallback parser disabled due to init error", zap.Error(err))
 	}
 
-	auctionUC := usecase.NewAuctionUseCase(bidRepo, groupRepo, tgClient, logger)
-	handlerTg.UseCase = auctionUC
+	auctionUC := usecase.NewClassAuctionUseCase(auctionRepo, nil, aiFallbackParser, logger)
+
+	accountManager := telegram.NewAccountManager(cfg, accountRepo, groupRepo, auctionUC, aiUC, logger)
+	if setter, ok := auctionUC.(interface {
+		SetTelegramGateway(usecase.AuctionTelegramGateway)
+	}); ok {
+		setter.SetTelegramGateway(accountManager)
+	}
 
 	authUC := usecase.NewAuthUseCase(userRepo)
 	userUC := usecase.NewUserUseCase(userRepo)
-	messageUC := usecase.NewMessageUseCase(tgClient, auctionUC, logger)
+	messageUC := usecase.NewMessageUseCase(accountManager, logger)
 
-	// 3. Init HTTP Delivery
+	// 4. Init HTTP Delivery
 	authHandler := deliveryHttp.NewAuthHandler(authUC)
-	bidHandler := deliveryHttp.NewBidHandler(auctionUC)
+	accountHandler := deliveryHttp.NewAccountHandler(cfg, accountRepo, groupRepo, auctionRepo, auctionUC, accountManager)
+	auctionHandler := deliveryHttp.NewClassAuctionHandler(auctionUC)
 	aiHandler := deliveryHttp.NewAIHandler(aiUC)
 	userHandler := deliveryHttp.NewUserHandler(userUC)
 	messageHandler := deliveryHttp.NewMessageHandler(messageUC)
-	router := deliveryHttp.InitRouter(authHandler, bidHandler, aiHandler, userHandler, messageHandler, cfg.B2BAPIKeys)
 
-	// 4. Run Services
+	router := deliveryHttp.InitRouter(
+		authHandler,
+		accountHandler,
+		auctionHandler,
+		aiHandler,
+		userHandler,
+		messageHandler,
+		cfg.B2BAPIKeys,
+	)
+
+	// 5. Run Services with Graceful Shutdown
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if err := accountManager.StartAllEnabled(ctx); err != nil {
+		logger.Error("Failed to start enabled Telegram accounts", zap.Error(err))
+	}
+
 	if cfg.WatchdogTargetURL != "" && (cfg.WatchdogAlertChatID != 0 || cfg.WatchdogAlertUsername != "") {
 		watchdog := usecase.NewHealthWatchdog(usecase.WatchdogConfig{
-			TargetURL:     cfg.WatchdogTargetURL,
-			HealthToken:   cfg.WatchdogHealthToken,
-			Interval:      cfg.WatchdogInterval,
-			FailThreshold: cfg.WatchdogFailThreshold,
-			ServiceName:   cfg.WatchdogServiceName,
-			AlertChatID:   cfg.WatchdogAlertChatID,
-			AlertTopicID:  cfg.WatchdogAlertTopicID,
-			AlertUsername: cfg.WatchdogAlertUsername,
+			TargetURL:      cfg.WatchdogTargetURL,
+			HealthToken:    cfg.WatchdogHealthToken,
+			Interval:       cfg.WatchdogInterval,
+			FailThreshold:  cfg.WatchdogFailThreshold,
+			ServiceName:    cfg.WatchdogServiceName,
+			AlertAccountID: cfg.WatchdogAccountID,
+			AlertChatID:    cfg.WatchdogAlertChatID,
+			AlertTopicID:   cfg.WatchdogAlertTopicID,
+			AlertUsername:  cfg.WatchdogAlertUsername,
 		}, messageUC, logger)
 		go watchdog.Start(ctx)
 	}
 
-	// Run HTTP Server in background
+	srv := &http.Server{
+		Addr:    ":8080",
+		Handler: router,
+	}
+
 	go func() {
 		logger.Info("HTTP Server starting on :8080")
-		if err := router.Run(":8080"); err != nil && err != http.ErrServerClosed {
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			logger.Fatal("http server error", zap.Error(err))
 		}
 	}()
 
-	// Run Telegram Client
-	otpProvider := func(ctx context.Context) (string, error) {
-		if auc, ok := auctionUC.(interface {
-			WaitOTP(context.Context) (string, error)
-		}); ok {
-			return auc.WaitOTP(ctx)
-		}
-		return "", http.ErrNoCookie // Just a dummy error
-	}
+	<-ctx.Done()
+	logger.Info("Shutdown signal received, stopping HTTP server and Telegram accounts...")
 
-	onSuccess := func() {
-		auctionUC.SetStatus("RUNNING")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		logger.Error("HTTP server forced shutdown", zap.Error(err))
 	}
-
-	if err := tgClient.Start(ctx, os.Getenv("PHONE_NUMBER"), os.Getenv("PASSWORD"), logger, otpProvider, onSuccess); err != nil {
-		logger.Fatal("bot error", zap.Error(err))
-	}
+	accountManager.Shutdown()
+	logger.Info("Tele-Gateway stopped cleanly")
 }

@@ -8,6 +8,7 @@ import (
 )
 
 type TelegramGroup struct {
+	AccountID uint           `gorm:"primaryKey;autoIncrement:false" json:"account_id"`
 	ID        int64          `gorm:"primaryKey;autoIncrement:false" json:"id"`
 	ParentID  int64          `gorm:"index" json:"parent_id"` // Jika ini Topic, ini ID Supergroupnya
 	Title     string         `gorm:"type:varchar(255);not null" json:"title"`
@@ -19,7 +20,8 @@ type TelegramGroup struct {
 
 type TelegramGroupRepository interface {
 	Upsert(group *TelegramGroup) error
-	FindAll() ([]TelegramGroup, error)
+	FindAllByAccount(accountID uint) ([]TelegramGroup, error)
+	DeleteByAccount(accountID uint) error
 }
 
 type GroupInfo struct {

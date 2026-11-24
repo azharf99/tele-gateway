@@ -13,25 +13,22 @@ import (
 
 const maxTelegramMessageRunes = 4096
 
-type MessageSender interface {
-	SendMessage(ctx context.Context, chatID int64, topicID int, username string, text string) error
-}
-
-type BotStatusProvider interface {
-	GetStatus() string
+// MultiAccountMessageSender routes proactive B2B/Watchdog messages to the
+// designated B2B Telegram account managed by AccountManager.
+type MultiAccountMessageSender interface {
+	ResolveB2BAccount(requestedAccountID uint) (accountID uint, status domain.AccountStatus, err error)
+	SendMessage(ctx context.Context, accountID uint, chatID int64, topicID int, username string, text string) error
 }
 
 type messageUseCase struct {
-	sender         MessageSender
-	statusProvider BotStatusProvider
-	logger         *zap.Logger
+	sender MultiAccountMessageSender
+	logger *zap.Logger
 }
 
-func NewMessageUseCase(sender MessageSender, statusProvider BotStatusProvider, logger *zap.Logger) domain.MessageUseCase {
+func NewMessageUseCase(sender MultiAccountMessageSender, logger *zap.Logger) domain.MessageUseCase {
 	return &messageUseCase{
-		sender:         sender,
-		statusProvider: statusProvider,
-		logger:         logger,
+		sender: sender,
+		logger: logger,
 	}
 }
 
@@ -52,16 +49,21 @@ func (u *messageUseCase) SendMessage(ctx context.Context, req domain.SendMessage
 		return fmt.Errorf("%w: topic_id must be >= 0", domain.ErrInvalidTarget)
 	}
 
-	if u.statusProvider != nil && u.statusProvider.GetStatus() != "RUNNING" {
+	accountID, status, err := u.sender.ResolveB2BAccount(req.AccountID)
+	if err != nil {
+		return err
+	}
+	if status != domain.AccountStatusRunning {
 		return domain.ErrBotNotRunning
 	}
 
-	if err := u.sender.SendMessage(ctx, req.ChatID, req.TopicID, username, msg); err != nil {
+	if err := u.sender.SendMessage(ctx, accountID, req.ChatID, req.TopicID, username, msg); err != nil {
 		return fmt.Errorf("send telegram message: %w", err)
 	}
 
 	if u.logger != nil {
 		u.logger.Info("B2B Telegram message sent",
+			zap.Uint("account_id", accountID),
 			zap.Int64("chat_id", req.ChatID),
 			zap.Int("topic_id", req.TopicID),
 			zap.Bool("via_username", hasUser),
