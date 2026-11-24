@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/azharf99/tele-gateway/internal/domain"
@@ -24,6 +25,7 @@ type auctionUseCase struct {
 	TgClient  TelegramService
 	Logger    *zap.Logger
 	otpChan   chan string
+	statusMu  sync.RWMutex
 	status    string // WAITING_OTP, RUNNING, IDLE
 }
 
@@ -181,7 +183,7 @@ func (u *auctionUseCase) ImportRules(rules []domain.BidRule) (int, int, error) {
 }
 
 func (u *auctionUseCase) SubmitOTP(code string) error {
-	if u.status != "WAITING_OTP" {
+	if u.GetStatus() != "WAITING_OTP" {
 		return errors.New("not waiting for OTP")
 	}
 
@@ -196,15 +198,19 @@ func (u *auctionUseCase) SubmitOTP(code string) error {
 }
 
 func (u *auctionUseCase) GetStatus() string {
+	u.statusMu.RLock()
+	defer u.statusMu.RUnlock()
 	return u.status
 }
 
 func (u *auctionUseCase) SetStatus(status string) {
+	u.statusMu.Lock()
+	defer u.statusMu.Unlock()
 	u.status = status
 }
 
 func (u *auctionUseCase) SyncGroups(ctx context.Context) error {
-	if u.status != "RUNNING" {
+	if u.GetStatus() != "RUNNING" {
 		return errors.New("bot is not fully running yet. please ensure login/OTP is completed")
 	}
 	groups, err := u.TgClient.GetGroups(ctx)
@@ -230,7 +236,7 @@ func (u *auctionUseCase) GetAllGroups() ([]domain.TelegramGroup, error) {
 }
 
 func (u *auctionUseCase) GetTopicsByGroup(ctx context.Context, groupID int64) ([]domain.TopicInfo, error) {
-	if u.status != "RUNNING" {
+	if u.GetStatus() != "RUNNING" {
 		return nil, errors.New("bot is not fully running yet. please ensure login/OTP is completed")
 	}
 	return u.TgClient.GetTopics(ctx, groupID)
@@ -238,13 +244,15 @@ func (u *auctionUseCase) GetTopicsByGroup(ctx context.Context, groupID int64) ([
 
 // Internal method for Gotd Auth Flow
 func (u *auctionUseCase) WaitOTP(ctx context.Context) (string, error) {
-	u.status = "WAITING_OTP"
+	u.SetStatus("WAITING_OTP")
 
 	// Pastikan status di-reset jika gagal/timeout, agar tidak nyangkut di WAITING_OTP
 	defer func() {
+		u.statusMu.Lock()
 		if u.status == "WAITING_OTP" {
 			u.status = "IDLE"
 		}
+		u.statusMu.Unlock()
 	}()
 
 	select {

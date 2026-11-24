@@ -59,17 +59,33 @@ func main() {
 
 	authUC := usecase.NewAuthUseCase(userRepo)
 	userUC := usecase.NewUserUseCase(userRepo)
+	messageUC := usecase.NewMessageUseCase(tgClient, auctionUC, logger)
 
 	// 3. Init HTTP Delivery
 	authHandler := deliveryHttp.NewAuthHandler(authUC)
 	bidHandler := deliveryHttp.NewBidHandler(auctionUC)
 	aiHandler := deliveryHttp.NewAIHandler(aiUC)
 	userHandler := deliveryHttp.NewUserHandler(userUC)
-	router := deliveryHttp.InitRouter(authHandler, bidHandler, aiHandler, userHandler)
+	messageHandler := deliveryHttp.NewMessageHandler(messageUC)
+	router := deliveryHttp.InitRouter(authHandler, bidHandler, aiHandler, userHandler, messageHandler, cfg.B2BAPIKeys)
 
 	// 4. Run Services
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	if cfg.WatchdogTargetURL != "" && (cfg.WatchdogAlertChatID != 0 || cfg.WatchdogAlertUsername != "") {
+		watchdog := usecase.NewHealthWatchdog(usecase.WatchdogConfig{
+			TargetURL:     cfg.WatchdogTargetURL,
+			HealthToken:   cfg.WatchdogHealthToken,
+			Interval:      cfg.WatchdogInterval,
+			FailThreshold: cfg.WatchdogFailThreshold,
+			ServiceName:   cfg.WatchdogServiceName,
+			AlertChatID:   cfg.WatchdogAlertChatID,
+			AlertTopicID:  cfg.WatchdogAlertTopicID,
+			AlertUsername: cfg.WatchdogAlertUsername,
+		}, messageUC, logger)
+		go watchdog.Start(ctx)
+	}
 
 	// Run HTTP Server in background
 	go func() {

@@ -31,8 +31,12 @@ type TelegramClient struct {
 	// channelHashes caches access hashes that are known to be valid for outgoing
 	// RPC calls, keyed by channel ID. Hashes attached to push updates are NOT
 	// always usable — see resolveChannelPeer — so they never populate this map.
+	// basicChatIDs records active basic group IDs seen in dialogs; usernamePeers
+	// caches resolved @username peers to avoid ContactsResolveUsername rate limits.
 	hashMu        sync.RWMutex
 	channelHashes map[int64]int64
+	basicChatIDs  map[int64]struct{}
+	usernamePeers map[string]tg.InputPeerClass
 }
 
 func NewTelegramClient(appID int, appHash string, sessionPath string, handler telegram.UpdateHandler, logger *zap.Logger) (*TelegramClient, error) {
@@ -48,6 +52,8 @@ func NewTelegramClient(appID int, appHash string, sessionPath string, handler te
 		Sender:        message.NewSender(tg.NewClient(client)),
 		Logger:        logger,
 		channelHashes: make(map[int64]int64),
+		basicChatIDs:  make(map[int64]struct{}),
+		usernamePeers: make(map[string]tg.InputPeerClass),
 	}, nil
 }
 
@@ -155,6 +161,153 @@ func isStalePeerErr(err error) bool {
 	return tgerr.Is(err, tg.ErrChannelInvalid, tg.ErrPeerIDInvalid, tg.ErrChannelPrivate)
 }
 
+func isStaleUserPeerErr(err error) bool {
+	return isStalePeerErr(err) || tgerr.Is(err, tg.ErrUserIDInvalid)
+}
+
+func normalizeMTProtoChatID(id int64) int64 {
+	if id < -1000000000000 {
+		return -id - 1000000000000
+	}
+	if id < 0 {
+		return -id
+	}
+	return id
+}
+
+func normalizeUsername(raw string) string {
+	return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(raw), "@"))
+}
+
+// SendMessage sends a proactive message to a group/channel (optionally inside a
+// forum topic when topicID > 1) or a direct message to a @username.
+func (c *TelegramClient) SendMessage(ctx context.Context, chatID int64, topicID int, username string, text string) error {
+	if strings.TrimSpace(username) != "" {
+		norm := normalizeUsername(username)
+		peer, err := c.resolveUsernamePeer(ctx, norm)
+		if err != nil {
+			return err
+		}
+		if err := c.send(ctx, peer, 0, text); err != nil {
+			if !isStaleUserPeerErr(err) {
+				return fmt.Errorf("failed to send message to @%s: %w", norm, err)
+			}
+			c.forgetUsernamePeer(norm)
+			fresh, resolveErr := c.resolveUsernamePeer(ctx, norm)
+			if resolveErr != nil {
+				return fmt.Errorf("failed to send message to @%s: %w (re-resolve failed: %v)", norm, err, resolveErr)
+			}
+			if retryErr := c.send(ctx, fresh, 0, text); retryErr != nil {
+				return fmt.Errorf("failed to send message to @%s after re-resolve: %w", norm, retryErr)
+			}
+		}
+		return nil
+	}
+
+	replyID := 0
+	if topicID > 1 {
+		replyID = topicID
+	}
+
+	peer, err := c.resolveChatPeer(ctx, chatID)
+	if err != nil {
+		return err
+	}
+	if err := c.send(ctx, peer, replyID, text); err != nil {
+		channel, isChannel := peer.(*tg.InputPeerChannel)
+		if !isChannel || !isStalePeerErr(err) {
+			return fmt.Errorf("failed to send message to chat %d: %w", chatID, err)
+		}
+		c.forgetChannelHash(channel.ChannelID)
+		fresh, resolveErr := c.resolveChannelPeer(ctx, channel.ChannelID)
+		if resolveErr != nil {
+			return fmt.Errorf("failed to send message to chat %d: %w (peer re-resolve failed: %v)", chatID, err, resolveErr)
+		}
+		if retryErr := c.send(ctx, fresh, replyID, text); retryErr != nil {
+			return fmt.Errorf("failed to send message to chat %d after peer re-resolve: %w", chatID, retryErr)
+		}
+	}
+	return nil
+}
+
+func (c *TelegramClient) cachedUsernamePeer(norm string) (tg.InputPeerClass, bool) {
+	c.hashMu.RLock()
+	defer c.hashMu.RUnlock()
+	peer, ok := c.usernamePeers[norm]
+	return peer, ok
+}
+
+func (c *TelegramClient) forgetUsernamePeer(norm string) {
+	c.hashMu.Lock()
+	defer c.hashMu.Unlock()
+	delete(c.usernamePeers, norm)
+}
+
+func (c *TelegramClient) resolveUsernamePeer(ctx context.Context, norm string) (tg.InputPeerClass, error) {
+	if norm == "" {
+		return nil, fmt.Errorf("%w: empty username", domain.ErrInvalidTarget)
+	}
+	if peer, ok := c.cachedUsernamePeer(norm); ok {
+		return peer, nil
+	}
+
+	raw := tg.NewClient(c.Client)
+	resp, err := raw.ContactsResolveUsername(ctx, &tg.ContactsResolveUsernameRequest{
+		Username: norm,
+	})
+	if err != nil {
+		if tgerr.Is(err, tg.ErrUsernameInvalid, tg.ErrUsernameNotOccupied) {
+			return nil, fmt.Errorf("%w: username @%s", domain.ErrTargetNotFound, norm)
+		}
+		return nil, fmt.Errorf("resolve username @%s: %w", norm, err)
+	}
+
+	peer, ok := inputPeerFor(resp.Peer, resp.Users, resp.Chats)
+	if !ok {
+		return nil, fmt.Errorf("%w: could not resolve @%s", domain.ErrTargetNotFound, norm)
+	}
+
+	c.hashMu.Lock()
+	if c.usernamePeers == nil {
+		c.usernamePeers = make(map[string]tg.InputPeerClass)
+	}
+	c.usernamePeers[norm] = peer
+	c.hashMu.Unlock()
+
+	return peer, nil
+}
+
+func (c *TelegramClient) lookupCachedChatPeer(id int64) (tg.InputPeerClass, bool) {
+	c.hashMu.RLock()
+	defer c.hashMu.RUnlock()
+	if hash, ok := c.channelHashes[id]; ok {
+		return &tg.InputPeerChannel{ChannelID: id, AccessHash: hash}, true
+	}
+	if _, ok := c.basicChatIDs[id]; ok {
+		return &tg.InputPeerChat{ChatID: id}, true
+	}
+	return nil, false
+}
+
+func (c *TelegramClient) resolveChatPeer(ctx context.Context, chatID int64) (tg.InputPeerClass, error) {
+	id := normalizeMTProtoChatID(chatID)
+	if id <= 0 {
+		return nil, fmt.Errorf("%w: invalid chat_id %d", domain.ErrInvalidTarget, chatID)
+	}
+	if peer, ok := c.lookupCachedChatPeer(id); ok {
+		return peer, nil
+	}
+
+	if err := c.refreshChannelHashes(ctx); err != nil {
+		return nil, err
+	}
+
+	if peer, ok := c.lookupCachedChatPeer(id); ok {
+		return peer, nil
+	}
+	return nil, fmt.Errorf("%w: chat %d not found in dialogs", domain.ErrTargetNotFound, id)
+}
+
 // usablePeer swaps a channel peer's access hash for a cached, known-good one.
 // Non-channel peers and channels we have never resolved are returned untouched
 // so the normal send path still works; the retry in Reply covers the rest.
@@ -195,9 +348,9 @@ func (c *TelegramClient) forgetChannelHash(channelID int64) {
 	delete(c.channelHashes, channelID)
 }
 
-// cacheChannels records the access hash of every full channel constructor in
-// chats. "min" constructors are skipped: their access hash only works in the
-// context it arrived in and would poison the cache.
+// cacheChannels records the access hash of every full channel constructor and
+// active basic group ID in chats. "min" constructors are skipped: their access
+// hash only works in the context it arrived in and would poison the cache.
 func (c *TelegramClient) cacheChannels(chats []tg.ChatClass) {
 	c.hashMu.Lock()
 	defer c.hashMu.Unlock()
@@ -205,12 +358,22 @@ func (c *TelegramClient) cacheChannels(chats []tg.ChatClass) {
 	if c.channelHashes == nil {
 		c.channelHashes = make(map[int64]int64)
 	}
+	if c.basicChatIDs == nil {
+		c.basicChatIDs = make(map[int64]struct{})
+	}
 	for _, chatClass := range chats {
-		channel, ok := chatClass.(*tg.Channel)
-		if !ok || channel.Min || channel.AccessHash == 0 {
-			continue
+		switch ch := chatClass.(type) {
+		case *tg.Channel:
+			if ch.Min || ch.AccessHash == 0 {
+				continue
+			}
+			c.channelHashes[ch.ID] = ch.AccessHash
+		case *tg.Chat:
+			if ch.Deactivated {
+				continue
+			}
+			c.basicChatIDs[ch.ID] = struct{}{}
 		}
-		c.channelHashes[channel.ID] = channel.AccessHash
 	}
 }
 

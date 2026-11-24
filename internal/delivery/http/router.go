@@ -11,7 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func InitRouter(authHandler *AuthHandler, bidHandler *BidHandler, aiHandler *AIHandler, userHandler *UserHandler) *gin.Engine {
+func InitRouter(authHandler *AuthHandler, bidHandler *BidHandler, aiHandler *AIHandler, userHandler *UserHandler, messageHandler *MessageHandler, b2bAPIKeys []string) *gin.Engine {
 	r := gin.Default()
 
 	r.SetTrustedProxies(nil)
@@ -29,7 +29,7 @@ func InitRouter(authHandler *AuthHandler, bidHandler *BidHandler, aiHandler *AIH
 	r.Use(cors.New(cors.Config{
 		AllowOrigins:     allowedOrigins, // For production, specify your frontend URL
 		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization", "X-API-Key"},
 		ExposeHeaders:    []string{"Content-Length"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
@@ -41,6 +41,15 @@ func InitRouter(authHandler *AuthHandler, bidHandler *BidHandler, aiHandler *AIH
 	// Public Routes (Tanpa Middleware Auth)
 	api.POST("/login", authHandler.Login)
 	api.POST("/refresh", authHandler.RefreshToken)
+
+	// Backend-to-Backend Routes (X-API-Key atau JWT Admin)
+	if messageHandler != nil {
+		b2b := api.Group("/messages")
+		b2b.Use(APIKeyOrAdminMiddleware(b2bAPIKeys))
+		{
+			b2b.POST("/send", messageHandler.SendMessage)
+		}
+	}
 
 	// Protected Routes
 	protected := api.Group("/")
