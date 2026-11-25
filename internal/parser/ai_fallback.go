@@ -39,7 +39,7 @@ func NewAIFallbackParser(apiKey string, logger *zap.Logger) (*AIFallbackParser, 
 	aimodel := strings.TrimSpace(os.Getenv("AI_FALLBACK_MODEL"))
 
 	if aimodel == "" {
-		aimodel = "gemini-3.1-flash-lite"
+		aimodel = "gemini-3.5-flash-lite"
 	}
 
 	return &AIFallbackParser{

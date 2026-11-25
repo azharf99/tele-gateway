@@ -142,7 +142,7 @@ func (u *aiGatewayUseCase) processQueue(queueKey string, senderID int64, promptO
 		Temperature:       &temperature,
 	}
 
-	resp, err := u.genaiClient.Models.GenerateContent(ctx, "gemini-3.1-flash-lite", genai.Text(combinedMessages), config)
+	resp, err := u.genaiClient.Models.GenerateContent(ctx, "gemini-3.5-flash-lite", genai.Text(combinedMessages), config)
 	if err != nil {
 		u.logger.Error("Gemini API error", zap.Error(err))
 		return // Do not send error message to avoid leaking sensitive info

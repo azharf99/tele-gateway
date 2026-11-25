@@ -81,7 +81,7 @@ This is the core auction logic and the most subtle part of the codebase:
 
 Per-sender **debounced batching**: incoming DMs are queued per `senderID` in a `sync.Map` of `userQueue`. A 60-second debounce timer resets on each new message; when it fires, up to **10 messages** are joined and sent to Gemini in one call, with a follow-up 10s timer draining any overflow. This coalesces rapid-fire user messages into a single AI turn.
 
-Gemini specifics: uses `google.golang.org/genai` with `BackendGeminiAPI`, model `gemini-3.1-flash-lite`. The system prompt is loaded from the `AIContext` DB row keyed `system_prompt` and passed via **`SystemInstruction`** (deliberately NOT as user content) to prevent prompt leakage. On any API error or empty response the bot **stays silent** rather than replying — do not add error/fallback replies to the user. Responses are suffixed with `[Dibalas oleh Azhar's AI Assistant]`.
+Gemini specifics: uses `google.golang.org/genai` with `BackendGeminiAPI`, model `gemini-3.5-flash-lite`. The system prompt is loaded from the `AIContext` DB row keyed `system_prompt` and passed via **`SystemInstruction`** (deliberately NOT as user content) to prevent prompt leakage. On any API error or empty response the bot **stays silent** rather than replying — do not add error/fallback replies to the user. Responses are suffixed with `[Dibalas oleh Azhar's AI Assistant]`.
 
 ### HTTP API ([router.go](internal/delivery/http/router.go))
 
