@@ -207,6 +207,7 @@ type ClassAuctionProfile struct {
 	SlotCooldownSec        int               `gorm:"default:0" json:"slot_cooldown_sec"`
 
 	// Parsing & safety
+	AutoMarkWonOnBid    bool   `gorm:"default:true" json:"auto_mark_won_on_bid"` // Automatically reserve/carve slot & mark WON on live bid
 	EnableAIFallback    bool   `gorm:"default:false" json:"enable_ai_fallback"`
 	IgnoreReplies       bool   `gorm:"default:true" json:"ignore_replies"`
 	StopKeywords        string `gorm:"type:text;default:'SOLD,CLOSED,TAKEN,DONE,BATAL,CANCELLED,CANCELED'" json:"stop_keywords"`
@@ -238,6 +239,7 @@ func DefaultClassAuctionProfile(accountID uint) *ClassAuctionProfile {
 		MinDelayMs:             0,
 		MaxDelayMs:             0,
 		SlotCooldownSec:        0,
+		AutoMarkWonOnBid:       true,
 		EnableAIFallback:       false,
 		IgnoreReplies:          true,
 		StopKeywords:           "SOLD,CLOSED,TAKEN,DONE,BATAL,CANCELLED,CANCELED",
@@ -445,6 +447,7 @@ type ClassAuctionRepository interface {
 	ListDateOverrides(accountID uint) ([]DateAvailabilityOverride, error)
 	CreateDateOverride(override *DateAvailabilityOverride) error
 	DeleteDateOverride(accountID uint, overrideID uint) error
+	DeleteMatchingBlockOverride(accountID uint, date string, startMinute, endMinute int) error
 
 	CreateAuctionLog(log *AuctionLog) error
 	FindAuctionLogByID(accountID uint, logID uint) (*AuctionLog, error)

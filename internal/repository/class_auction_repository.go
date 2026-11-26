@@ -106,6 +106,12 @@ func (r *classAuctionRepository) DeleteDateOverride(accountID uint, overrideID u
 	return r.db.Where("account_id = ? AND id = ?", accountID, overrideID).Delete(&domain.DateAvailabilityOverride{}).Error
 }
 
+func (r *classAuctionRepository) DeleteMatchingBlockOverride(accountID uint, date string, startMinute, endMinute int) error {
+	return r.db.Where("account_id = ? AND date = ? AND kind = ? AND start_minute = ? AND end_minute = ?",
+		accountID, date, domain.OverrideBlock, startMinute, endMinute).
+		Delete(&domain.DateAvailabilityOverride{}).Error
+}
+
 func (r *classAuctionRepository) CreateAuctionLog(logEntry *domain.AuctionLog) error {
 	return r.db.Create(logEntry).Error
 }
